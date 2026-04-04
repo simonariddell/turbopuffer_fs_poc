@@ -1,0 +1,28 @@
+{
+  "id": "csv-analysis-v1",
+  "title": "Analyze transactions and produce grouped summaries",
+  "kind": "csv_analysis",
+  "version": 1,
+  "entrypoint": "/TASK.md",
+  "allowed_outputs": [
+    "/output/by_customer.csv",
+    "/output/by_month.csv",
+    "/output/findings.md",
+    "/logs/run.jsonl",
+    "/logs/summary.md"
+  ],
+  "expected_inputs": [
+    "/data/transactions.csv"
+  ],
+  "suggested_checks": [
+    "output_exists:/output/by_customer.csv",
+    "output_exists:/output/by_month.csv",
+    "output_exists:/output/findings.md",
+    "log_exists:/logs/run.jsonl"
+  ],
+  "tags": [
+    "csv",
+    "analysis",
+    "aggregation"
+  ]
+}

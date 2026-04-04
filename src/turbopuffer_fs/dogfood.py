@@ -33,6 +33,7 @@ from .paths import basename, normalize_path, parent_path
 
 DogfoodOp = dict[str, object]
 ModelState = dict[str, dict[str, object]]
+BundleSpec = dict[str, object]
 
 
 TEXT_PAYLOADS = [
@@ -47,6 +48,75 @@ BINARY_PAYLOADS = [
     b"\x10\x20\x30\x40",
     bytes(range(16)),
 ]
+
+
+def load_bundle_spec(local_root: str | Path) -> BundleSpec:
+    root = Path(local_root)
+    spec_path = root / "bundle.json"
+    return json.loads(spec_path.read_text(encoding="utf-8"))
+
+
+def _bundle_task_text(local_root: str | Path) -> str:
+    root = Path(local_root)
+    return (root / "TASK.md").read_text(encoding="utf-8")
+
+
+def _default_run_log_path(local_root: str | Path) -> str:
+    spec = load_bundle_spec(local_root)
+    for path in spec.get("allowed_outputs", []):
+        if str(path).endswith("run.jsonl"):
+            return str(path)
+    return "/logs/run.jsonl"
+
+
+def _default_summary_path(local_root: str | Path) -> str:
+    spec = load_bundle_spec(local_root)
+    for path in spec.get("allowed_outputs", []):
+        if str(path).endswith("summary.md"):
+            return str(path)
+    return "/logs/summary.md"
+
+
+def list_allowed_outputs(local_root: str | Path) -> list[str]:
+    spec = load_bundle_spec(local_root)
+    return [normalize_path(str(path)) for path in spec.get("allowed_outputs", [])]
+
+
+def bundle_entrypoint(local_root: str | Path) -> str:
+    spec = load_bundle_spec(local_root)
+    return normalize_path(str(spec.get("entrypoint", "/TASK.md")))
+
+
+def bundle_task_prompt(local_root: str | Path) -> str:
+    spec = load_bundle_spec(local_root)
+    allowed_outputs = "\n".join(f"- {path}" for path in list_allowed_outputs(local_root))
+    return (
+        "You are working inside a filesystem-shaped workspace backed by turbopuffer.\n\n"
+        "Rules:\n"
+        "- Use the filesystem interface for all persistent reads and writes.\n"
+        "- Read /bundle.json and /TASK.md first.\n"
+        "- Log every meaningful action to /logs/run.jsonl.\n"
+        "- Write a final summary to /logs/summary.md.\n"
+        "- Only write outputs to allowed output locations.\n\n"
+        f"Bundle ID: {spec.get('id', 'unknown')}\n"
+        f"Entrypoint: {bundle_entrypoint(local_root)}\n"
+        "Allowed outputs:\n"
+        f"{allowed_outputs}\n\n"
+        "Task:\n"
+        f"{_bundle_task_text(local_root)}"
+    )
+
+
+def validate_bundle_outputs(client, mount: str, local_root: str | Path) -> list[str]:
+    missing = []
+    for path in list_allowed_outputs(local_root):
+        if stat(client, mount, path) is None:
+            missing.append(path)
+    return missing
+
+
+def seed_bundle(client, mount: str, local_root: str | Path, *, mount_root: str = "/") -> dict[str, object]:
+    return ingest_directory(client, mount, local_root, mount_root=mount_root)
 
 
 def new_model_state() -> ModelState:

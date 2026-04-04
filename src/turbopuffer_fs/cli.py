@@ -24,6 +24,15 @@ from .live import (
     rm,
     stat,
 )
+from .dogfood import (
+    bundle_entrypoint,
+    bundle_task_prompt,
+    list_allowed_outputs,
+    load_bundle_spec,
+    run_dogfood,
+    seed_bundle,
+    validate_bundle_outputs,
+)
 
 
 def _json_dump(value: object) -> str:
@@ -136,6 +145,32 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument("--mount-root", default="/")
     ingest_parser.add_argument("--batch-size", type=int, default=256)
 
+    bundle_parser = subparsers.add_parser("bundle-show")
+    bundle_parser.add_argument("local_root")
+
+    bundle_seed_parser = subparsers.add_parser("bundle-seed")
+    bundle_seed_parser.add_argument("mount")
+    bundle_seed_parser.add_argument("local_root")
+    bundle_seed_parser.add_argument("--mount-root", default="/")
+
+    bundle_validate_parser = subparsers.add_parser("bundle-validate")
+    bundle_validate_parser.add_argument("mount")
+    bundle_validate_parser.add_argument("local_root")
+
+    prompt_parser = subparsers.add_parser("bundle-prompt")
+    prompt_parser.add_argument("local_root")
+
+    dogfood_parser = subparsers.add_parser("dogfood")
+    dogfood_parser.add_argument("--mount-prefix", default="dogfood")
+    dogfood_parser.add_argument("--seed", type=int, default=1)
+    dogfood_parser.add_argument("--steps", type=int, default=50)
+    dogfood_parser.add_argument("--check-every", type=int, default=5)
+    dogfood_parser.add_argument("--keep-on-fail", action="store_true")
+    dogfood_parser.add_argument("--keep-always", action="store_true")
+    dogfood_parser.add_argument("--no-cleanup", dest="cleanup", action="store_false")
+    dogfood_parser.set_defaults(cleanup=True)
+    dogfood_parser.add_argument("--artifact-dir")
+
     return parser
 
 
@@ -194,6 +229,34 @@ def run_cli(args: argparse.Namespace):
             args.local_root,
             mount_root=args.mount_root,
             batch_size=args.batch_size,
+        )
+    if command == "bundle-show":
+        spec = load_bundle_spec(args.local_root)
+        return {
+            "spec": spec,
+            "entrypoint": bundle_entrypoint(args.local_root),
+            "allowed_outputs": list_allowed_outputs(args.local_root),
+        }
+    if command == "bundle-seed":
+        return seed_bundle(client, args.mount, args.local_root, mount_root=args.mount_root)
+    if command == "bundle-validate":
+        missing = validate_bundle_outputs(client, args.mount, args.local_root)
+        return {"missing": missing, "ok": not missing}
+    if command == "bundle-prompt":
+        return {"prompt": bundle_task_prompt(args.local_root)}
+    if command == "dogfood":
+        return run_dogfood(
+            api_key=args.api_key,
+            region=args.region,
+            base_url=args.base_url,
+            mount_prefix=args.mount_prefix,
+            seed=args.seed,
+            steps=args.steps,
+            check_every=args.check_every,
+            keep_on_fail=args.keep_on_fail,
+            keep_always=args.keep_always,
+            cleanup=args.cleanup,
+            artifact_dir=args.artifact_dir,
         )
     raise ValueError(f"unsupported command: {command!r}")
 

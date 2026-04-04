@@ -33,6 +33,13 @@ def run_cli(args: list[str], monkeypatch: pytest.MonkeyPatch, calls: list[tuple[
     monkeypatch.setattr(cli, "put_bytes", recorder("put_bytes"))
     monkeypatch.setattr(cli, "rm", recorder("rm"))
     monkeypatch.setattr(cli, "ingest_directory", recorder("ingest_directory"))
+    monkeypatch.setattr(cli, "load_bundle_spec", lambda local_root: {"id": "csv-cleaning-v1", "allowed_outputs": ["/logs/run.jsonl"]})
+    monkeypatch.setattr(cli, "bundle_entrypoint", lambda local_root: "/TASK.md")
+    monkeypatch.setattr(cli, "list_allowed_outputs", lambda local_root: ["/logs/run.jsonl"])
+    monkeypatch.setattr(cli, "bundle_task_prompt", lambda local_root: "Allowed outputs:\n- /logs/run.jsonl")
+    monkeypatch.setattr(cli, "seed_bundle", recorder("seed_bundle"))
+    monkeypatch.setattr(cli, "validate_bundle_outputs", lambda client, mount, local_root: [])
+    monkeypatch.setattr(cli, "run_dogfood", lambda **kwargs: {"steps_completed": kwargs["steps"], "checks_run": 1})
     monkeypatch.setattr(cli, "make_client", lambda **kwargs: {"client": kwargs})
     return cli.main(args)
 
@@ -86,6 +93,23 @@ def test_cli_ingest_calls_wrapper(monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert calls[0][0] == "ingest_directory"
     assert calls[0][2]["mount_root"] == "/archive"
     assert calls[0][2]["batch_size"] == 5
+
+
+def test_cli_bundle_show(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["bundle-show", "/workspace/examples/task-bundles/csv-cleaning-v1"], monkeypatch, calls)
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["spec"]["id"] == "csv-cleaning-v1"
+    assert output["entrypoint"] == "/TASK.md"
+
+
+def test_cli_bundle_prompt(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["bundle-prompt", "/workspace/examples/task-bundles/csv-cleaning-v1"], monkeypatch, calls)
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert "Allowed outputs:" in output["prompt"]
 
 
 def test_cli_requires_text_source(monkeypatch: pytest.MonkeyPatch) -> None:
