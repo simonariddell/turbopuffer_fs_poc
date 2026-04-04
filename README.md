@@ -198,6 +198,41 @@ from turbopuffer_fs import ingest_directory
 ingest_directory(client, "documents", "./local-docs", mount_root="/archive")
 ```
 
+## CLI
+
+The package also ships with a tiny JSON-first CLI:
+
+```bash
+tpfs --region aws-us-west-2 mounts
+tpfs --region aws-us-west-2 ls documents /notes
+tpfs --region aws-us-west-2 put-text documents /notes/todo.txt --stdin
+tpfs --region aws-us-west-2 grep documents / oauth --ignore-case
+```
+
+Use `--api-key`, `--region`, or `--base-url` explicitly, or rely on the
+corresponding environment variables you export in your shell.
+
+## Dogfooding harness
+
+There is also a seeded live dogfood runner for exercising the wrapper the way an
+agent would:
+
+```bash
+python3 -m turbopuffer_fs.dogfood \
+  --api-key "$TURBOPUFFER_API_KEY" \
+  --region "$TURBOPUFFER_REGION" \
+  --seed 7 \
+  --steps 50 \
+  --check-every 5
+```
+
+This runner:
+- creates a fresh mount/namespace
+- performs randomized filesystem-shaped operations
+- maintains a local shadow model
+- checks invariants as it goes
+- can emit replayable failure artifacts with `--artifact-dir`
+
 ## Non-goals
 
 This library intentionally does not implement:

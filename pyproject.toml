@@ -18,6 +18,9 @@ dev = [
   "pytest",
 ]
 
+[project.scripts]
+tpfs = "turbopuffer_fs.cli:main"
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]

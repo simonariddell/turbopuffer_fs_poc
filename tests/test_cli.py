@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from turbopuffer_fs import cli
+
+
+def run_cli(args: list[str], monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, tuple, dict]], *, stdin: str = ""):
+    monkeypatch.setattr(cli.sys, "stdin", type("FakeStdin", (), {"read": lambda self: stdin})())
+
+    def recorder(name: str):
+        def _call(*call_args, **call_kwargs):
+            calls.append((name, call_args, call_kwargs))
+            if name == "read_bytes":
+                return b"\x00\x01"
+            return {"ok": True, "name": name}
+
+        return _call
+
+    monkeypatch.setattr(cli, "list_mounts", recorder("list_mounts"))
+    monkeypatch.setattr(cli, "stat", recorder("stat"))
+    monkeypatch.setattr(cli, "ls", recorder("ls"))
+    monkeypatch.setattr(cli, "find", recorder("find"))
+    monkeypatch.setattr(cli, "cat", recorder("cat"))
+    monkeypatch.setattr(cli, "read_text", recorder("read_text"))
+    monkeypatch.setattr(cli, "read_bytes", recorder("read_bytes"))
+    monkeypatch.setattr(cli, "grep", recorder("grep"))
+    monkeypatch.setattr(cli, "mkdir", recorder("mkdir"))
+    monkeypatch.setattr(cli, "put_text", recorder("put_text"))
+    monkeypatch.setattr(cli, "put_bytes", recorder("put_bytes"))
+    monkeypatch.setattr(cli, "rm", recorder("rm"))
+    monkeypatch.setattr(cli, "ingest_directory", recorder("ingest_directory"))
+    monkeypatch.setattr(cli, "make_client", lambda **kwargs: {"client": kwargs})
+    return cli.main(args)
+
+
+def test_cli_ls_outputs_json(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["ls", "documents", "/notes"], monkeypatch, calls)
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["name"] == "ls"
+    assert calls[0][0] == "ls"
+    assert calls[0][1][1] == "documents"
+    assert calls[0][1][2] == "/notes"
+
+
+def test_cli_put_text_supports_stdin(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["put-text", "documents", "/notes/a.txt", "--stdin"], monkeypatch, calls, stdin="hello\n")
+    assert exit_code == 0
+    json.loads(capsys.readouterr().out)
+    assert calls[0][0] == "put_text"
+    assert calls[0][1][3] == "hello\n"
+
+
+def test_cli_put_bytes_supports_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    source = tmp_path / "data.bin"
+    source.write_bytes(b"\x01\x02")
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["put-bytes", "documents", "/bin/data.bin", "--file", str(source)], monkeypatch, calls)
+    assert exit_code == 0
+    json.loads(capsys.readouterr().out)
+    assert calls[0][0] == "put_bytes"
+    assert calls[0][1][3] == b"\x01\x02"
+
+
+def test_cli_read_bytes_can_write_output_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    target = tmp_path / "out.bin"
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["read-bytes", "documents", "/bin/data.bin", "--out", str(target)], monkeypatch, calls)
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["bytes_written"] == 2
+    assert target.read_bytes() == b"\x00\x01"
+
+
+def test_cli_ingest_calls_wrapper(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["ingest", "documents", ".", "--mount-root", "/archive", "--batch-size", "5"], monkeypatch, calls)
+    assert exit_code == 0
+    json.loads(capsys.readouterr().out)
+    assert calls[0][0] == "ingest_directory"
+    assert calls[0][2]["mount_root"] == "/archive"
+    assert calls[0][2]["batch_size"] == 5
+
+
+def test_cli_requires_text_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["put-text", "documents", "/notes/a.txt"], monkeypatch, calls)
+    assert exit_code == 2

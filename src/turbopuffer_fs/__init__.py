@@ -35,6 +35,7 @@ from .live import (
     stat,
     tail,
 )
+from .dogfood import run_dogfood
 from .post import content_bytes, content_text
 from .runtime import execute_plan, finalize_plan, run
 
@@ -69,6 +70,7 @@ __all__ = [
     "read_text_plan",
     "rm",
     "rm_plan",
+    "run_dogfood",
     "run",
     "stat",
     "stat_plan",

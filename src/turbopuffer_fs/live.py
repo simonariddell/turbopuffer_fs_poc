@@ -147,3 +147,9 @@ def put_bytes(client, mount: str, path: str, data: bytes, *, mime: str | None = 
 
 def rm(client, mount: str, path: str, *, recursive: bool = False):
     return run(client, rm_plan(mount_namespace(mount), path, recursive=recursive))
+
+
+def ingest_directory(client, mount: str, local_root, *, mount_root: str = "/", batch_size: int = 256):
+    from .ingest import ingest_directory as _ingest_directory
+
+    return _ingest_directory(client, mount, local_root, mount_root=mount_root, batch_size=batch_size)
