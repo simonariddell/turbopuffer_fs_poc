@@ -3,5 +3,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .hypothesis/
+node_modules/
+dist/
+.vite/
 
 *.egg-info/

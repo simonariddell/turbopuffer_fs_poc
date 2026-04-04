@@ -1,10 +1,12 @@
 import { Buffer } from "node:buffer";
 
-import type { AnyObject, ExecuteResults, RowLike } from "./types.js";
+import type { AnyObject, ExecuteResults, RowLike, WriteResult } from "./types.js";
 import { contentRow, metadataRow } from "./schema.js";
 
-const rows = (results: ExecuteResults, name: string): RowLike[] =>
-  Array.isArray(results[name]?.rows) ? (results[name]?.rows as RowLike[]) : [];
+const rows = (results: ExecuteResults, name: string): RowLike[] => {
+  const value = results[name] as AnyObject | undefined;
+  return Array.isArray(value?.rows) ? (value.rows as RowLike[]) : [];
+};
 
 const row = (results: ExecuteResults, name: string): RowLike | null => rows(results, name)[0] ?? null;
 
@@ -110,11 +112,11 @@ export const FINALIZERS = {
     );
   },
   write_summary: (_context: AnyObject, results: ExecuteResults) => {
-    const { name: _name, ...value } = (results.write ?? {}) as AnyObject;
+    const { name: _name, ...value } = (results.write ?? {}) as WriteResult;
     return value;
   },
   write_target_meta: (context: AnyObject, results: ExecuteResults) => {
-    const { name: _name, ...value } = (results.write ?? {}) as AnyObject;
+    const { name: _name, ...value } = (results.write ?? {}) as WriteResult;
     return {
       path: context.path,
       row: contentRow(context.targetRow as RowLike),
@@ -131,7 +133,7 @@ export const FINALIZERS = {
         ids: [],
       };
     }
-    const write = { ...(results.write ?? {}) };
+    const write = { ...((results.write ?? {}) as WriteResult) };
     const deletedIds = Array.isArray(write.deleted_ids)
       ? [...write.deleted_ids]
       : !Boolean(context.recursive) && target.id !== undefined

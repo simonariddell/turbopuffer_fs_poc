@@ -7,7 +7,7 @@ export type Row = RowLike;
 export type FsRow = RowLike;
 export type FsSchema = Record<string, unknown>;
 
-export type QueryStep = {
+export interface QueryStep {
   kind: "query";
   name: string;
   payload: AnyObject;
@@ -15,36 +15,36 @@ export type QueryStep = {
   limit?: number | null;
   pageSize?: number;
   orderField?: string;
-};
+}
 
-export type WriteStep = {
+export interface WriteStep {
   kind: "write";
   name: string;
   payload: AnyObject;
-};
+}
 
-export type AssertStep = {
+export interface AssertStep {
   kind: "assert";
   name: string;
   check: string;
-};
+}
 
-export type NamespacesStep = {
+export interface NamespacesStep {
   kind: "namespaces";
   name: string;
   payload?: AnyObject;
-};
+}
 
 export type PlanStep = QueryStep | WriteStep | AssertStep | NamespacesStep;
 
-export type Plan = {
+export interface Plan {
   namespace: string;
   steps: PlanStep[];
   finalize: string;
   context: AnyObject;
-};
+}
 
-export type QueryResult = {
+export interface QueryResult {
   name: string;
   rows: RowLike[];
   billing?: unknown;
@@ -53,24 +53,30 @@ export type QueryResult = {
   aggregationGroups?: unknown;
   pages?: QueryPage[];
   pageCount?: number;
-};
+  [key: string]: unknown;
+}
 
 export type QueryPage = QueryResult;
 
-export type WriteResult = AnyObject & {
-  name: string;
-};
+export type WriteResult = AnyObject & { name: string };
 
-export type NamespacesResult = {
+export interface NamespacesResult {
   name: string;
   namespaces: { id: string }[];
   nextCursor?: string | null;
-};
+  [key: string]: unknown;
+}
 
-export type StepResult = QueryResult | WriteResult | NamespacesResult | { name: string; status: string };
-export type ExecuteResults = Record<string, StepResult & AnyObject>;
+export interface StatusResult {
+  name: string;
+  status: string;
+  [key: string]: unknown;
+}
 
-export type ExecuteResult = {
+export type StepResult = QueryResult | WriteResult | NamespacesResult | StatusResult;
+export type ExecuteResults = Record<string, StepResult>;
+
+export interface ExecuteResult {
   plan: Plan;
   results: ExecuteResults;
-};
+}
