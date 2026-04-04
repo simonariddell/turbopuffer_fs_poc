@@ -1,0 +1,4 @@
+# file: /workspace/src/turbopuffer_fs/schema.py
+# hypothesis_version: 6.151.10
+
+[b'\x00', '.c', '.cfg', '.conf', '.cpp', '.css', '.csv', '.html', '.ini', '.java', '.js', '.json', '.jsx', '.md', '.py', '.r', '.rb', '.rs', '.rst', '.sh', '.sql', '.svg', '.toml', '.ts', '.tsv', '.tsx', '.txt', '.xml', '.yaml', '.yml', 'application/json', 'application/sql', 'application/x-sh', 'application/xml', 'ascii', 'basename', 'blob_b64', 'dir', 'ext', 'file', 'filterable', 'id', 'image/svg+xml', 'inode/directory', 'is_text', 'kind', 'mime', 'parent', 'path', 'regex', 'schema', 'sha256', 'size_bytes', 'source_mtime_ns', 'source_size_bytes', 'string', 'text', 'text/', 'text/plain', 'type', 'uint', 'upsert_rows', 'utf-8']

@@ -1,0 +1,4 @@
+# file: /workspace/src/turbopuffer_fs/runtime.py
+# hypothesis_version: 6.151.10
+
+[256, 'OK', '_', '__dict__', 'aggregation_groups', 'aggregations', 'assert', 'billing', 'check', 'context', 'delete_batch_size', 'delete_rows_from', 'deleted_ids', 'deletes', 'filters', 'finalize', 'id', 'kind', 'limit', 'message', 'model_dump', 'name', 'namespace', 'namespaces', 'next_cursor', 'ok', 'order_field', 'page_count', 'page_size', 'pages', 'paginate', 'path', 'payload', 'performance', 'plan', 'query', 'response', 'results', 'rows', 'rows_affected', 'rows_deleted', 'status', 'steps', 'to_dict', 'write', 'writes']

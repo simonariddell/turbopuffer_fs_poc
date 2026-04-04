@@ -4,10 +4,41 @@ from __future__ import annotations
 
 import hashlib
 from glob import escape as glob_escape
+from pathlib import PurePosixPath
+from posixpath import join as posix_join
+from posixpath import normpath
 from typing import Iterable
 
 
 PATH_ID_PREFIX = "path:"
+
+
+def _require_text(value: object, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    if value == "":
+        raise ValueError(f"{label} must not be empty")
+    if "\x00" in value:
+        raise ValueError(f"{label} must not contain NUL bytes")
+    return value
+
+
+def _normalize_candidate(raw: str, *, label: str, allow_glob: bool) -> str:
+    if not raw.startswith("/"):
+        raise ValueError(f"{label} must be absolute: {raw!r}")
+    if raw == "/":
+        return "/"
+
+    raw_segments = [segment for segment in raw.split("/") if segment]
+    if any(segment in {".", ".."} for segment in raw_segments):
+        raise ValueError(f"{label} must not contain '.' or '..' segments: {raw!r}")
+    normalized = normpath("/" + raw.lstrip("/"))
+    normalized_segments = [segment for segment in normalized.split("/") if segment]
+    if any(segment == ".." for segment in normalized_segments):
+        raise ValueError(f"{label} must stay within root: {raw!r}")
+    if allow_glob:
+        return "/" + "/".join(raw_segments)
+    return normalized
 
 
 def normalize_path(path: str) -> str:
@@ -22,81 +53,49 @@ def normalize_path(path: str) -> str:
     - NUL bytes are rejected
     """
 
-    if not isinstance(path, str):
-        raise TypeError("path must be a string")
-    if path == "":
-        raise ValueError("path must not be empty")
-    if "\x00" in path:
-        raise ValueError("path must not contain NUL bytes")
-    if not path.startswith("/"):
-        raise ValueError(f"path must be absolute: {path!r}")
-    if path == "/":
-        return "/"
-
-    segments = [segment for segment in path.split("/") if segment]
-    if any(segment in {".", ".."} for segment in segments):
-        raise ValueError(f"path must not contain '.' or '..' segments: {path!r}")
-    return "/" + "/".join(segments)
+    return _normalize_candidate(_require_text(path, label="path"), label="path", allow_glob=False)
 
 
 def normalize_glob_path(pattern: str) -> str:
-    if not isinstance(pattern, str):
-        raise TypeError("glob pattern must be a string")
-    if pattern == "":
-        raise ValueError("glob pattern must not be empty")
-    if "\x00" in pattern:
-        raise ValueError("glob pattern must not contain NUL bytes")
-    if not pattern.startswith("/"):
-        raise ValueError(f"glob pattern must be absolute: {pattern!r}")
-    if pattern == "/":
-        return "/"
-
-    segments = [segment for segment in pattern.split("/") if segment]
-    if any(segment in {".", ".."} for segment in segments):
-        raise ValueError(f"glob pattern must not contain '.' or '..' segments: {pattern!r}")
-    return "/" + "/".join(segments)
+    return _normalize_candidate(_require_text(pattern, label="glob pattern"), label="glob pattern", allow_glob=True)
 
 
 def join_path(root: str, tail: str) -> str:
     root_value = normalize_path(root)
-    if not isinstance(tail, str):
-        raise TypeError("tail must be a string")
-    if tail == "":
+    tail_value = _require_text(tail, label="tail") if tail != "" else ""
+    if tail_value == "":
         return root_value
-    if tail.startswith("/"):
-        return normalize_path(tail)
-    joined = f"{root_value.rstrip('/')}/{tail}"
-    return normalize_path(joined)
+    if tail_value.startswith("/"):
+        return normalize_path(tail_value)
+    return normalize_path(posix_join(root_value, tail_value))
 
 
 def join_glob(root: str, pattern: str) -> str:
     root_value = normalize_path(root)
-    if pattern.startswith("/"):
-        return normalize_glob_path(pattern)
-    joined = f"{root_value.rstrip('/')}/{pattern}"
-    return normalize_glob_path(joined)
+    pattern_value = _require_text(pattern, label="glob pattern")
+    if pattern_value.startswith("/"):
+        return normalize_glob_path(pattern_value)
+    return normalize_glob_path(posix_join(root_value, pattern_value))
 
 
 def parent_path(path: str) -> str | None:
     value = normalize_path(path)
     if value == "/":
         return None
-    parts = value.rstrip("/").split("/")
-    return "/" if len(parts) == 2 else "/".join(parts[:-1])
+    parent = str(PurePosixPath(value).parent)
+    return "/" if parent == "." else parent
 
 
 def basename(path: str) -> str:
     value = normalize_path(path)
-    return "/" if value == "/" else value.rsplit("/", 1)[-1]
+    return "/" if value == "/" else PurePosixPath(value).name
 
 
 def extension(path: str) -> str:
     name = basename(path)
     if name in {"/", "", ".", ".."}:
         return ""
-    if "." not in name.lstrip("."):
-        return ""
-    return "." + name.rsplit(".", 1)[-1]
+    return PurePosixPath(name).suffix
 
 
 def ancestor_paths(path: str, *, include_self: bool = False) -> list[str]:
@@ -104,15 +103,10 @@ def ancestor_paths(path: str, *, include_self: bool = False) -> list[str]:
     if value == "/":
         return ["/"] if include_self else []
 
-    pieces = value.strip("/").split("/")
-    limit = len(pieces) if include_self else len(pieces) - 1
-    if limit < 1:
-        return ["/"]
-
-    rows = ["/"]
-    for index in range(1, limit + 1):
-        rows.append("/" + "/".join(pieces[:index]))
-    return rows
+    path_obj = PurePosixPath(value)
+    ancestors = [str(parent) for parent in reversed(path_obj.parents)]
+    rows = ["/", *[parent for parent in ancestors if parent != "/"]]
+    return rows + ([value] if include_self else [])
 
 
 def path_id(path: str) -> str:

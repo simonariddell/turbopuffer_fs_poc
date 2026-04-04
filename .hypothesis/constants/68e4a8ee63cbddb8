@@ -1,0 +1,4 @@
+# file: /workspace/src/turbopuffer_fs/post.py
+# hypothesis_version: 6.151.10
+
+['blob_b64', 'candidates', 'cat', 'children', 'deleted', 'deleted_ids', 'dir', 'file', 'find', 'grep', 'head', 'id', 'ids', 'ignore_case', 'is_text', 'kind', 'line', 'line_number', 'ls', 'matches', 'mounts', 'n', 'name', 'namespaces', 'path', 'pattern', 'read_bytes', 'read_text', 'recursive', 'rm', 'root', 'row', 'rows', 'stat', 'suffix', 'tail', 'target', 'target_row', 'text', 'utf-8', 'write', 'write_summary', 'write_target_meta']
