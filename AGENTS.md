@@ -39,5 +39,12 @@ There is no formal test suite. All modules except `live.py` (client construction
 | Variable | Required | Description |
 |---|---|---|
 | `TURBOPUFFER_API_KEY` | Yes (for live API) | Authentication key for turbopuffer |
-| `TURBOPUFFER_REGION` | Yes (for live API) | Region endpoint (e.g. `us-east-1`) |
+| `TURBOPUFFER_REGION` | Yes (for live API) | Region endpoint (e.g. `aws-us-east-1`) |
 | `TURBOPUFFER_BASE_URL` | No | Override API base URL |
+
+These are loaded from a `.env` file at the repo root (not committed; listed in `.gitignore`).
+
+### Known API caveats
+
+- The schema in `schema.py` enables `glob: True` on `path`, `basename`, and `text`. In the current turbopuffer API, `glob: True` makes an attribute non-filterable by default unless `filterable` is also explicitly set. This means `rank_by` + direct `path` equality filters will fail with a 400 error. The `ls` operation works because it filters on `parent` (a plain string attribute). `find` works via `basename` glob. `grep` works via `text` glob.
+- The query plans in `fs.py` use `rank_by` with a `limit` dict (`{"total": N}`), but the current turbopuffer SDK expects `top_k` for queries. The `rank_by` + `limit` approach may need updating to match SDK changes.
