@@ -1,4 +1,0 @@
-turbopuffer
-
-[dev]
-pytest

@@ -35,27 +35,32 @@ def test_live_round_trip() -> None:
     namespace = mount_namespace(mount)
     text_path = "/notes/hello.txt"
     binary_path = "/bin/data.bin"
+    try:
+        put_text(client, mount, text_path, "hello\noauth token\n")
+        put_bytes(client, mount, binary_path, b"\x00\x01\x02")
 
-    put_text(client, mount, text_path, "hello\noauth token\n")
-    put_bytes(client, mount, binary_path, b"\x00\x01\x02")
+        mounts = list_mounts(client)
+        assert mount in mounts
 
-    mounts = list_mounts(client)
-    assert mount in mounts
+        text_stat = stat(client, mount, text_path)
+        assert text_stat is not None
+        assert text_stat["path"] == text_path
 
-    text_stat = stat(client, mount, text_path)
-    assert text_stat is not None
-    assert text_stat["path"] == text_path
+        children = ls(client, mount, "/")
+        assert {row["path"] for row in children} >= {"/notes", "/bin"}
 
-    children = ls(client, mount, "/")
-    assert {row["path"] for row in children} >= {"/notes", "/bin"}
+        matches = find(client, mount, "/notes", glob="*.txt")
+        assert [row["path"] for row in matches] == ["/notes/hello.txt"]
 
-    matches = find(client, mount, "/notes", glob="*.txt")
-    assert [row["path"] for row in matches] == ["/notes/hello.txt"]
+        assert read_text(client, mount, text_path) == "hello\noauth token\n"
+        assert read_bytes(client, mount, binary_path) == b"\x00\x01\x02"
 
-    assert read_text(client, mount, text_path) == "hello\noauth token\n"
-    assert read_bytes(client, mount, binary_path) == b"\x00\x01\x02"
+        grep_matches = grep(client, mount, "/", "oauth", ignore_case=True)
+        assert grep_matches == [{"path": text_path, "line_number": 2, "line": "oauth token"}]
 
-    grep_matches = grep(client, mount, "/", "oauth", ignore_case=True)
-    assert grep_matches == [{"path": text_path, "line_number": 2, "line": "oauth token"}]
-
-    rm(client, mount, "/", recursive=True)
+        rm(client, mount, "/notes", recursive=True)
+        rm(client, mount, "/bin", recursive=True)
+    finally:
+        namespace_handle = client.namespace(namespace)
+        if hasattr(namespace_handle, "delete_all"):
+            namespace_handle.delete_all()

@@ -75,6 +75,45 @@ def _normalized_write(name: str, response) -> dict[str, object]:
     }
 
 
+def _delete_batches(namespace_handle, step: dict[str, object], results: dict[str, dict[str, object]]) -> dict[str, object]:
+    payload = dict(step["payload"])
+    source_name = str(payload["delete_rows_from"])
+    batch_size = int(payload.get("delete_batch_size", 256))
+    delete_rows = list(results.get(source_name, {}).get("rows", []))
+    delete_ids = [row["id"] for row in delete_rows if row.get("id") is not None]
+    if not delete_ids:
+        return {
+            "name": step["name"],
+            "status": "OK",
+            "message": "no rows matched delete request",
+            "rows_affected": 0,
+            "rows_deleted": 0,
+            "deleted_ids": [],
+            "writes": [],
+        }
+
+    write_payload = {key: value for key, value in payload.items() if key not in {"delete_rows_from", "delete_batch_size"}}
+    write_results = []
+    for index in range(0, len(delete_ids), batch_size):
+        batch = delete_ids[index : index + batch_size]
+        response = namespace_handle.write(**(write_payload | {"deletes": batch}))
+        write_results.append(_normalized_write(step["name"], response))
+
+    deleted_ids = []
+    for item in write_results:
+        deleted_ids.extend(item.get("deleted_ids", []) or [])
+
+    return {
+        "name": step["name"],
+        "status": "OK",
+        "message": "ok",
+        "rows_affected": sum(int(item.get("rows_affected", 0) or 0) for item in write_results),
+        "rows_deleted": sum(int(item.get("rows_deleted", 0) or 0) for item in write_results),
+        "deleted_ids": deleted_ids,
+        "writes": write_results,
+    }
+
+
 def _namespace_id(value) -> str:
     if isinstance(value, dict):
         return str(value["id"])
@@ -147,6 +186,8 @@ def run_step(client, namespace_handle, step: dict[str, object], context: dict[st
     if kind == "write":
         if namespace_handle is None:
             raise ValueError("write step requires a namespace handle")
+        if "delete_rows_from" in step["payload"]:
+            return _delete_batches(namespace_handle, step, results)
         response = namespace_handle.write(**step["payload"])
         return _normalized_write(step["name"], response)
     if kind == "namespaces":

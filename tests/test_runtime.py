@@ -78,3 +78,40 @@ def test_execute_plan_normalizes_query_write_and_namespaces():
     assert executed["results"]["target"]["rows"][0]["path"] == "/a"
     assert executed["results"]["write"]["status"] == "OK"
     assert executed["results"]["ns"]["namespaces"] == [{"id": "docs__fs"}, {"id": "logs"}]
+
+
+def test_execute_plan_batches_delete_rows_from_prior_query():
+    client = FakeClient(
+        namespaces={
+            "docs__fs": FakeNamespace(
+                "docs__fs",
+                query_responses=[FakeQueryResponse(rows=[{"id": "id-1"}, {"id": "id-2"}, {"id": "id-3"}])],
+            )
+        }
+    )
+    plan = {
+        "namespace": "docs__fs",
+        "steps": [
+            {
+                "kind": "query",
+                "name": "delete_targets",
+                "payload": {"filters": ("path", "Glob", "/notes/**"), "rank_by": ("path", "asc")},
+            },
+            {
+                "kind": "write",
+                "name": "write",
+                "payload": {
+                    "delete_rows_from": "delete_targets",
+                    "delete_batch_size": 2,
+                    "return_affected_ids": True,
+                },
+            },
+        ],
+    }
+    executed = execute_plan(client, plan)
+    namespace = client.namespace("docs__fs")
+    assert namespace.write_calls == [
+        {"deletes": ["id-1", "id-2"], "return_affected_ids": True},
+        {"deletes": ["id-3"], "return_affected_ids": True},
+    ]
+    assert executed["results"]["write"]["deleted_ids"] == ["id-1", "id-2", "id-3"]
