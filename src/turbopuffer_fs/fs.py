@@ -352,7 +352,8 @@ def rm_plan(namespace: str, path: str, recursive: bool = False) -> dict[str, obj
                 }
                 if recursive
                 else {
-                    "deletes": [path_id(value)],
+                    "delete_rows_from": "target",
+                    "delete_batch_size": 1,
                     "return_affected_ids": True,
                 },
             ),

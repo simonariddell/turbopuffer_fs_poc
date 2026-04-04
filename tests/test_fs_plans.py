@@ -78,7 +78,7 @@ def test_put_bytes_plan_marks_binary_target():
 def test_rm_plan_non_recursive_probes_children_and_deletes_by_id():
     plan = rm_plan("documents__fs", "/notes", recursive=False)
     assert [step["name"] for step in plan["steps"]] == ["target", "child_probe", "validate", "write"]
-    assert plan["steps"][-1]["payload"]["deletes"]
+    assert plan["steps"][-1]["payload"]["delete_rows_from"] == "target"
 
 
 def test_rm_plan_recursive_uses_delete_by_filter():

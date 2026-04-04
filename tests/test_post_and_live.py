@@ -108,3 +108,8 @@ def test_live_stat_delegates_through_runtime() -> None:
     value = stat(client, "documents", "/notes/a.txt")
     assert value["id"] == row["id"]
     assert value["path"] == "/notes/a.txt"
+
+
+def test_live_list_mounts_uses_auto_paginated_namespace_listing() -> None:
+    client = FakeClient(namespace_ids=["documents__fs", "photos__fs", "scratch"])
+    assert list_mounts(client) == ["documents", "photos"]

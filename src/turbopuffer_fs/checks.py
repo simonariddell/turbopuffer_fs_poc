@@ -49,6 +49,8 @@ def check_rm_preconditions(context: dict[str, object], results: dict[str, dict[s
     recursive = bool(context.get("recursive", False))
     target = first_row(results, "target")
     if target is None:
+        if recursive and "delete_targets" in results:
+            results["delete_targets"]["rows"] = []
         return
     if recursive:
         return

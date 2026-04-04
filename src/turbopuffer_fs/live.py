@@ -133,10 +133,6 @@ def read_bytes(client, mount: str, path: str) -> bytes:
     return run(client, read_bytes_plan(mount_namespace(mount), path))
 
 
-def read_text(client, mount: str, path: str) -> str:
-    return run(client, read_text_plan(mount_namespace(mount), path))
-
-
 def mkdir(client, mount: str, path: str):
     return run(client, mkdir_plan(mount_namespace(mount), path))
 
