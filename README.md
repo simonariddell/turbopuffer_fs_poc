@@ -233,6 +233,43 @@ This runner:
 - checks invariants as it goes
 - can emit replayable failure artifacts with `--artifact-dir`
 
+## Deployment-configurable workspaces
+
+Agent workspaces can use deployment or bundle-specific conventions instead of a
+hard-coded layout. The default workspace profile is:
+
+```json
+{
+  "entrypoint": "/TASK.md",
+  "bundle_manifest": "/bundle.json",
+  "session_state": "/state/session.json",
+  "logs_dir": "/logs",
+  "output_dir": "/output",
+  "scratch_dir": "/scratch",
+  "project_dir": "/project",
+  "input_dir": "/input"
+}
+```
+
+These paths are just conventions stored inside the same filesystem-backed
+namespace. Durable session state such as `pwd` / `cd` lives in the configured
+`session_state` JSON file, which means an agent can restart on another node and
+recover its workspace location without any sidecar metadata service.
+
+The CLI supports this with:
+
+```bash
+tpfs workspace-init documents
+tpfs workspace-show documents
+tpfs cd documents /project
+tpfs pwd documents
+tpfs ls documents               # defaults to current cwd
+tpfs cat documents src/file.py  # relative to current cwd
+```
+
+Task bundles can override parts of the workspace profile with a `workspace`
+section in `bundle.json`.
+
 ## Non-goals
 
 This library intentionally does not implement:

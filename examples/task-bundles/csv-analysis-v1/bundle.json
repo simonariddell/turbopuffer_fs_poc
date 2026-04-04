@@ -4,6 +4,12 @@
   "kind": "csv_analysis",
   "version": 1,
   "entrypoint": "/TASK.md",
+  "workspace": {
+    "input_dir": "/data",
+    "output_dir": "/output",
+    "logs_dir": "/logs",
+    "session_state": "/state/session.json"
+  },
   "allowed_outputs": [
     "/output/by_customer.csv",
     "/output/by_month.csv",

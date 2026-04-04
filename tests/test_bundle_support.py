@@ -8,6 +8,7 @@ from turbopuffer_fs.dogfood import (
     list_allowed_outputs,
     load_bundle_spec,
 )
+from turbopuffer_fs.workspace import resolve_workspace_config
 
 
 def bundle_path(name: str) -> Path:
@@ -28,3 +29,11 @@ def test_bundle_helpers() -> None:
     prompt = bundle_task_prompt(local_root)
     assert "Allowed outputs:" in prompt
     assert "code-maintenance-v1" in prompt
+
+
+def test_bundle_workspace_overrides_defaults() -> None:
+    local_root = bundle_path("csv-cleaning-v1")
+    config = resolve_workspace_config(bundle_spec=load_bundle_spec(local_root))
+    assert config["logs_dir"] == "/logs"
+    assert config["session_state"] == "/state/session.json"
+    assert config["project_dir"] == "/project"

@@ -4,6 +4,16 @@
   "kind": "csv_cleaning",
   "version": 1,
   "entrypoint": "/TASK.md",
+  "workspace": {
+    "entrypoint": "/TASK.md",
+    "bundle_manifest": "/bundle.json",
+    "session_state": "/state/session.json",
+    "logs_dir": "/logs",
+    "output_dir": "/output",
+    "scratch_dir": "/scratch",
+    "project_dir": "/project",
+    "input_dir": "/data"
+  },
   "allowed_outputs": [
     "/output/sales.cleaned.csv",
     "/output/cleaning_report.md",

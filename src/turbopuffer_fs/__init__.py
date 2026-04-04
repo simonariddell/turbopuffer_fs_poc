@@ -38,12 +38,23 @@ from .live import (
 from .dogfood import run_dogfood
 from .post import content_bytes, content_text
 from .runtime import execute_plan, finalize_plan, run
+from .workspace import (
+    DEFAULT_WORKSPACE_CONFIG,
+    default_workspace_config,
+    load_session_state,
+    resolve_user_path,
+    resolve_workspace_config,
+    save_session_state,
+    workspace_init,
+)
 
 __all__ = [
     "cat",
     "cat_plan",
     "content_bytes",
     "content_text",
+    "DEFAULT_WORKSPACE_CONFIG",
+    "default_workspace_config",
     "execute_plan",
     "finalize_plan",
     "find",
@@ -72,9 +83,14 @@ __all__ = [
     "rm_plan",
     "run_dogfood",
     "run",
+    "load_session_state",
+    "resolve_user_path",
+    "resolve_workspace_config",
+    "save_session_state",
     "stat",
     "stat_plan",
     "tail",
     "tail_plan",
     "upsert_rows_plan",
+    "workspace_init",
 ]

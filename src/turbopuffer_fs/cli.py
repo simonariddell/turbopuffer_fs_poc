@@ -25,6 +25,7 @@ from .live import (
     stat,
 )
 from .dogfood import (
+    bundle_config,
     bundle_entrypoint,
     bundle_task_prompt,
     list_allowed_outputs,
@@ -33,6 +34,16 @@ from .dogfood import (
     seed_bundle,
     validate_bundle_outputs,
 )
+from .workspace import (
+    load_session_state,
+    resolve_cli_path,
+    resolve_workspace_config,
+    save_session_state,
+    workspace_init,
+)
+
+read_session_state = load_session_state
+write_session_state = save_session_state
 
 
 def _json_dump(value: object) -> str:
@@ -65,15 +76,48 @@ def _client_from_args(args: argparse.Namespace):
     )
 
 
+def workspace_show(client, mount: str, *, workspace_config: dict[str, str]):
+    return {"workspace": workspace_config, "session": load_session_state(client, mount, workspace_config=workspace_config)}
+
+
+def workspace_pwd(client, mount: str, *, workspace_config: dict[str, str]):
+    state = load_session_state(client, mount, workspace_config=workspace_config)
+    return {"cwd": state["cwd"], "mount": mount}
+
+
+def workspace_cd(client, mount: str, path: str, *, workspace_config: dict[str, str]):
+    target = resolve_cli_path(path, cwd=load_session_state(client, mount, workspace_config=workspace_config)["cwd"])
+    updated = save_session_state(client, mount, {"cwd": target, "mount": mount}, workspace_config=workspace_config)
+    return {"cwd": updated["cwd"], "mount": mount}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tpfs", description="Filesystem-shaped turbopuffer CLI.")
     parser.add_argument("--api-key", dest="api_key")
     parser.add_argument("--region")
     parser.add_argument("--base-url", dest="base_url")
+    parser.add_argument("--workspace-config")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("mounts")
+
+    workspace_show_parser = subparsers.add_parser("workspace-show")
+    workspace_show_parser.add_argument("mount", nargs="?", default="documents")
+    workspace_show_parser.add_argument("--bundle-root")
+
+    workspace_init_parser = subparsers.add_parser("workspace-init")
+    workspace_init_parser.add_argument("mount", nargs="?", default="documents")
+    workspace_init_parser.add_argument("--bundle-root")
+
+    pwd_parser = subparsers.add_parser("pwd")
+    pwd_parser.add_argument("mount", nargs="?", default="documents")
+    pwd_parser.add_argument("--bundle-root")
+
+    cd_parser = subparsers.add_parser("cd")
+    cd_parser.add_argument("mount", nargs="?", default="documents")
+    cd_parser.add_argument("path")
+    cd_parser.add_argument("--bundle-root")
 
     stat_parser = subparsers.add_parser("stat")
     stat_parser.add_argument("mount")
@@ -177,51 +221,74 @@ def _build_parser() -> argparse.ArgumentParser:
 def run_cli(args: argparse.Namespace):
     client = _client_from_args(args)
     command = args.command
+    workspace_config = resolve_workspace_config(
+        config_path=getattr(args, "workspace_config", None),
+        bundle_root=getattr(args, "bundle_root", None),
+    )
 
     if command == "mounts":
         return list_mounts(client)
+    if command == "workspace-show":
+        return workspace_show(client, args.mount, workspace_config=workspace_config)
+    if command == "workspace-init":
+        return workspace_init(client, args.mount, workspace_config=workspace_config)
+    if command == "pwd":
+        return {"cwd": workspace_pwd(client, args.mount, workspace_config=workspace_config), "mount": args.mount}
+    if command == "cd":
+        updated = workspace_cd(client, args.mount, args.path, workspace_config=workspace_config)
+        return {"cwd": updated["cwd"], "mount": args.mount}
     if command == "stat":
-        return stat(client, args.mount, args.path)
+        return stat(client, args.mount, resolve_cli_path(args.path, cwd=workspace_pwd(client, args.mount, workspace_config=workspace_config)))
     if command == "ls":
-        return ls(client, args.mount, args.path, limit=args.limit)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        return ls(client, args.mount, resolve_cli_path(args.path, cwd=cwd), limit=args.limit)
     if command == "find":
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
         return find(
             client,
             args.mount,
-            args.root,
+            resolve_cli_path(args.root, cwd=cwd),
             glob=args.glob,
             kind=args.kind,
             ignore_case=args.ignore_case,
             limit=args.limit,
         )
     if command == "cat":
-        return cat(client, args.mount, args.path)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        return cat(client, args.mount, resolve_cli_path(args.path, cwd=cwd))
     if command == "read-text":
-        return read_text(client, args.mount, args.path)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        return read_text(client, args.mount, resolve_cli_path(args.path, cwd=cwd))
     if command == "read-bytes":
-        data = read_bytes(client, args.mount, args.path)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        data = read_bytes(client, args.mount, resolve_cli_path(args.path, cwd=cwd))
         if args.out:
             Path(args.out).write_bytes(data)
-            return {"path": args.path, "out": args.out, "bytes_written": len(data), "size_bytes": len(data)}
-        return {"path": args.path, "size_bytes": len(data), "blob_b64": base64.b64encode(data).decode("ascii")}
+            return {"path": resolve_cli_path(args.path, cwd=cwd), "out": args.out, "bytes_written": len(data), "size_bytes": len(data)}
+        return {"path": resolve_cli_path(args.path, cwd=cwd), "size_bytes": len(data), "blob_b64": base64.b64encode(data).decode("ascii")}
     if command == "grep":
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
         return grep(
             client,
             args.mount,
-            args.root,
+            resolve_cli_path(args.root, cwd=cwd),
             args.pattern,
             glob=args.glob,
             ignore_case=args.ignore_case,
             limit=args.limit,
         )
     if command == "mkdir":
-        return mkdir(client, args.mount, args.path)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        return mkdir(client, args.mount, resolve_cli_path(args.path, cwd=cwd))
     if command == "put-text":
-        return put_text(client, args.mount, args.path, _load_text_input(args), mime=args.mime)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        return put_text(client, args.mount, resolve_cli_path(args.path, cwd=cwd), _load_text_input(args), mime=args.mime)
     if command == "put-bytes":
-        return put_bytes(client, args.mount, args.path, _load_bytes_input(args), mime=args.mime)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        return put_bytes(client, args.mount, resolve_cli_path(args.path, cwd=cwd), _load_bytes_input(args), mime=args.mime)
     if command == "rm":
-        return rm(client, args.mount, args.path, recursive=args.recursive)
+        cwd = workspace_pwd(client, args.mount, workspace_config=workspace_config)
+        return rm(client, args.mount, resolve_cli_path(args.path, cwd=cwd), recursive=args.recursive)
     if command == "ingest":
         return ingest_directory(
             client,
@@ -236,6 +303,7 @@ def run_cli(args: argparse.Namespace):
             "spec": spec,
             "entrypoint": bundle_entrypoint(args.local_root),
             "allowed_outputs": list_allowed_outputs(args.local_root),
+            "workspace": bundle_config(args.local_root),
         }
     if command == "bundle-seed":
         return seed_bundle(client, args.mount, args.local_root, mount_root=args.mount_root)

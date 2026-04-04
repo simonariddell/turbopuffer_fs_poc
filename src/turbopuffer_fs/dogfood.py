@@ -29,6 +29,7 @@ from . import (
     stat,
 )
 from .paths import basename, normalize_path, parent_path
+from .workspace import initialize_workspace, resolve_workspace_config
 
 
 DogfoodOp = dict[str, object]
@@ -61,6 +62,11 @@ def _bundle_task_text(local_root: str | Path) -> str:
     return (root / "TASK.md").read_text(encoding="utf-8")
 
 
+def bundle_config(local_root: str | Path) -> dict[str, str]:
+    spec = load_bundle_spec(local_root)
+    return resolve_workspace_config(bundle_spec=spec)
+
+
 def _default_run_log_path(local_root: str | Path) -> str:
     spec = load_bundle_spec(local_root)
     for path in spec.get("allowed_outputs", []):
@@ -90,16 +96,18 @@ def bundle_entrypoint(local_root: str | Path) -> str:
 def bundle_task_prompt(local_root: str | Path) -> str:
     spec = load_bundle_spec(local_root)
     allowed_outputs = "\n".join(f"- {path}" for path in list_allowed_outputs(local_root))
+    workspace = resolve_workspace_config(bundle_spec=spec)
     return (
         "You are working inside a filesystem-shaped workspace backed by turbopuffer.\n\n"
         "Rules:\n"
         "- Use the filesystem interface for all persistent reads and writes.\n"
         "- Read /bundle.json and /TASK.md first.\n"
-        "- Log every meaningful action to /logs/run.jsonl.\n"
-        "- Write a final summary to /logs/summary.md.\n"
+        f"- Log every meaningful action to {workspace['logs_dir']}/run.jsonl.\n"
+        f"- Write a final summary to {workspace['logs_dir']}/summary.md.\n"
         "- Only write outputs to allowed output locations.\n\n"
         f"Bundle ID: {spec.get('id', 'unknown')}\n"
         f"Entrypoint: {bundle_entrypoint(local_root)}\n"
+        f"Session state file: {workspace['session_state']}\n"
         "Allowed outputs:\n"
         f"{allowed_outputs}\n\n"
         "Task:\n"
@@ -116,7 +124,14 @@ def validate_bundle_outputs(client, mount: str, local_root: str | Path) -> list[
 
 
 def seed_bundle(client, mount: str, local_root: str | Path, *, mount_root: str = "/") -> dict[str, object]:
-    return ingest_directory(client, mount, local_root, mount_root=mount_root)
+    summary = ingest_directory(client, mount, local_root, mount_root=mount_root)
+    spec = load_bundle_spec(local_root)
+    workspace = resolve_workspace_config(bundle_spec=spec)
+    initialize_workspace(client, mount, workspace_config=workspace, cwd=workspace["project_dir"])
+    return {
+        **summary,
+        "workspace": workspace,
+    }
 
 
 def new_model_state() -> ModelState:

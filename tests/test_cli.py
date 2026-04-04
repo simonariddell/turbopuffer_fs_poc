@@ -40,6 +40,25 @@ def run_cli(args: list[str], monkeypatch: pytest.MonkeyPatch, calls: list[tuple[
     monkeypatch.setattr(cli, "seed_bundle", recorder("seed_bundle"))
     monkeypatch.setattr(cli, "validate_bundle_outputs", lambda client, mount, local_root: [])
     monkeypatch.setattr(cli, "run_dogfood", lambda **kwargs: {"steps_completed": kwargs["steps"], "checks_run": 1})
+    monkeypatch.setattr(cli, "resolve_workspace_config", lambda **kwargs: {
+        "entrypoint": "/TASK.md",
+        "bundle_manifest": "/bundle.json",
+        "session_state": "/state/session.json",
+        "logs_dir": "/logs",
+        "output_dir": "/output",
+        "scratch_dir": "/scratch",
+        "project_dir": "/project",
+        "input_dir": "/input",
+    })
+    monkeypatch.setattr(cli, "workspace_show", lambda client, mount, *, workspace_config: {"workspace": workspace_config, "session": {"cwd": "/project", "mount": mount}})
+    monkeypatch.setattr(cli, "workspace_pwd", lambda client, mount, *, workspace_config: "/project")
+    monkeypatch.setattr(cli, "workspace_cd", lambda client, mount, path, *, workspace_config: {"cwd": "/output", "mount": mount})
+    monkeypatch.setattr(cli, "write_session_state", lambda client, mount, state, *, workspace_config: state)
+    monkeypatch.setattr(cli, "workspace_init", lambda client, mount, *, workspace_config, bundle_id=None, cwd=None: {
+        "workspace": workspace_config,
+        "session": {"cwd": cwd or workspace_config["project_dir"], "mount": mount},
+    })
+    monkeypatch.setattr(cli, "resolve_cli_path", lambda path, *, cwd: path if str(path).startswith("/") else f"{cwd.rstrip('/')}/{path}")
     monkeypatch.setattr(cli, "make_client", lambda **kwargs: {"client": kwargs})
     return cli.main(args)
 
@@ -110,6 +129,26 @@ def test_cli_bundle_prompt(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captu
     assert exit_code == 0
     output = json.loads(capsys.readouterr().out)
     assert "Allowed outputs:" in output["prompt"]
+
+
+def test_cli_workspace_show(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    exit_code = run_cli(["workspace-show", "documents"], monkeypatch, calls)
+    assert exit_code == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["workspace"]["session_state"] == "/state/session.json"
+
+
+def test_cli_pwd_and_cd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+    assert run_cli(["pwd", "documents"], monkeypatch, calls) == 0
+    pwd_output = json.loads(capsys.readouterr().out)
+    assert pwd_output["cwd"] == "/project"
+
+    calls = []
+    assert run_cli(["cd", "documents", "/output"], monkeypatch, calls) == 0
+    cd_output = json.loads(capsys.readouterr().out)
+    assert cd_output["cwd"] == "/output"
 
 
 def test_cli_requires_text_source(monkeypatch: pytest.MonkeyPatch) -> None:
