@@ -1,0 +1,4 @@
+turbopuffer
+
+[dev]
+pytest

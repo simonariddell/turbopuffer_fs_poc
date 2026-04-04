@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turbopuffer-fs"
+version = "0.1.0"
+description = "A small filesystem-shaped query compiler/runtime over turbopuffer."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "turbopuffer",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
