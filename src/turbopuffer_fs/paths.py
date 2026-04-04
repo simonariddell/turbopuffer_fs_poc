@@ -112,7 +112,7 @@ def ancestor_paths(path: str, *, include_self: bool = False) -> list[str]:
 def path_id(path: str) -> str:
     value = normalize_path(path)
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"{PATH_ID_PREFIX}{digest}"
+    return digest
 
 
 def and_filter(*parts: tuple | None) -> tuple | None:

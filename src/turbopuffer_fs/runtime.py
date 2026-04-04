@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import turbopuffer
+
 from .checks import run_check
 from .paths import with_after_filter
 
@@ -180,8 +182,19 @@ def run_step(client, namespace_handle, step: dict[str, object], context: dict[st
         if namespace_handle is None:
             raise ValueError("query step requires a namespace handle")
         if step.get("paginate"):
-            return paginate_ordered_query(namespace_handle, step)
-        response = namespace_handle.query(**step["payload"])
+            try:
+                return paginate_ordered_query(namespace_handle, step)
+            except turbopuffer.NotFoundError:
+                return {
+                    "name": step["name"],
+                    "rows": [],
+                    "pages": [],
+                    "page_count": 0,
+                }
+        try:
+            response = namespace_handle.query(**step["payload"])
+        except turbopuffer.NotFoundError:
+            return _normalized_query(step["name"], {"rows": []})
         return _normalized_query(step["name"], response)
     if kind == "write":
         if namespace_handle is None:

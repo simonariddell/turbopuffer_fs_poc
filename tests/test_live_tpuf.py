@@ -63,4 +63,8 @@ def test_live_round_trip() -> None:
     finally:
         namespace_handle = client.namespace(namespace)
         if hasattr(namespace_handle, "delete_all"):
-            namespace_handle.delete_all()
+            try:
+                namespace_handle.delete_all()
+            except Exception as exc:
+                if exc.__class__.__name__ != "NotFoundError":
+                    raise

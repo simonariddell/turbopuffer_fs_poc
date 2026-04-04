@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from turbopuffer_fs.runtime import execute_plan, paginate_ordered_query, to_plain
 
 from .fakes import FakeClient, FakeNamespace, FakeNamespaceList, FakeQueryResponse, FakeWriteResponse
@@ -115,3 +117,23 @@ def test_execute_plan_batches_delete_rows_from_prior_query():
         {"deletes": ["id-3"], "return_affected_ids": True},
     ]
     assert executed["results"]["write"]["deleted_ids"] == ["id-1", "id-2", "id-3"]
+
+
+def test_execute_plan_treats_missing_namespace_reads_as_empty():
+    class NotFoundNamespace(FakeNamespace):
+        def query(self, **payload):
+            raise RuntimeError("404 namespace not found")
+
+    client = FakeClient(namespaces={"docs__fs": NotFoundNamespace("docs__fs")})
+    plan = {
+        "namespace": "docs__fs",
+        "steps": [
+            {
+                "kind": "query",
+                "name": "target",
+                "payload": {"filters": ("path", "Eq", "/a"), "limit": 1},
+            }
+        ],
+    }
+    with pytest.raises(RuntimeError):
+        execute_plan(client, plan)
