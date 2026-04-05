@@ -17,7 +17,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:conformance": "vitest run test/plans.test.ts test/finalize.test.ts test/runtime.test.ts test/workspace.test.ts",
+    "test:search-evals": "vitest run test/grep-eval.test.ts"
   },
   "dependencies": {
     "@turbopuffer/turbopuffer": "^1.21.0"

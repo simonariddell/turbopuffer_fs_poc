@@ -8,7 +8,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:conformance": "vitest run test/adapter.test.ts test/conformance.test.ts test/shell.test.ts",
+    "test:restart": "vitest run test/restart-harness.test.ts"
   },
   "dependencies": {
     "@workspace/turbopuffer-fs": "workspace:*",
