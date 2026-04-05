@@ -3,6 +3,7 @@ export * from "./paths.js";
 export * from "./schema.js";
 export * from "./plans.js";
 export * from "./grep.js";
+export * from "./grep-eval.js";
 export * from "./runtime.js";
 export * from "./finalize.js";
 export * from "./live.js";
