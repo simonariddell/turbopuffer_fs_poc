@@ -100,5 +100,5 @@ describeLive("live turbopuffer", () => {
     })) as Record<string, unknown>;
     expect(summary.stepsCompleted).toBe(12);
     expect(Number(summary.checksRun)).toBeGreaterThan(0);
-  });
+  }, 20000);
 });

@@ -42,11 +42,37 @@ describe("dogfood model", () => {
     ]);
   });
 
+  it("models cp and mv for files and directories", () => {
+    const state = newModelState();
+    applyModelOperation(state, { op: "put_text", path: "/notes/a.txt", text: "hello\n" });
+    applyModelOperation(state, { op: "mkdir", path: "/notes/archive" });
+
+    applyModelOperation(state, { op: "cp", path: "/notes/a.txt", dest: "/notes/b.txt", recursive: false });
+    applyModelOperation(state, { op: "mv", path: "/notes/archive", dest: "/notes/renamed" });
+
+    expect(modelFind(state, "/").map((row) => row.path)).toEqual([
+      "/",
+      "/notes",
+      "/notes/a.txt",
+      "/notes/b.txt",
+      "/notes/renamed",
+    ]);
+  });
+
   it("rejects non-recursive non-empty directory delete", () => {
     const state = newModelState();
     applyModelOperation(state, { op: "put_text", path: "/notes/a.txt", text: "hello\n" });
     expect(() => applyModelOperation(state, { op: "rm", path: "/notes", recursive: false })).toThrowError(
       "DirectoryNotEmptyError:/notes",
     );
+  });
+
+  it("rejects invalid directory copies", () => {
+    const state = newModelState();
+    applyModelOperation(state, { op: "mkdir", path: "/notes" });
+
+    expect(() =>
+      applyModelOperation(state, { op: "cp", path: "/notes", dest: "/notes/archive", recursive: true }),
+    ).toThrowError("InvalidCopyTarget:/notes->/notes/archive");
   });
 });

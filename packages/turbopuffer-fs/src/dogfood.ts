@@ -67,6 +67,36 @@ function ensureParentDirs(model: ModelState, path: string): void {
   }
 }
 
+function copyModelFile(model: ModelState, src: string, dest: string): void {
+  const source = model[src];
+  if (!source || source.kind !== "file") {
+    throw new Error(`FileNotFoundError:${src}`);
+  }
+  ensureParentDirs(model, dest);
+  model[dest] = {
+    ...source,
+    text: source.text,
+    bytes: source.bytes instanceof Uint8Array ? Uint8Array.from(source.bytes) : source.bytes,
+  };
+}
+
+function copyModelDirectory(model: ModelState, src: string, dest: string): void {
+  if (dest === src || dest.startsWith(`${src.replace(/\/$/, "")}/`)) {
+    throw new Error(`InvalidCopyTarget:${src}->${dest}`);
+  }
+  const subtree = descendantsOf(model, src);
+  for (const candidate of subtree) {
+    const suffix = candidate === src ? "" : candidate.slice(src.length);
+    const mapped = suffix === "" ? dest : normalizePath(`${dest.replace(/\/$/, "")}${suffix}`);
+    if (model[candidate]?.kind === "dir") {
+      ensureParentDirs(model, mapped);
+      model[mapped] = { kind: "dir" };
+      continue;
+    }
+    copyModelFile(model, candidate, mapped);
+  }
+}
+
 export function applyModelOperation(model: ModelState, operation: DogfoodOp): void {
   const op = String(operation.op);
   const path = normalizePath(String(operation.path));
@@ -100,6 +130,40 @@ export function applyModelOperation(model: ModelState, operation: DogfoodOp): vo
       }
       return;
     }
+    delete model[path];
+    return;
+  }
+  if (op === "cp") {
+    const dest = normalizePath(String(operation.dest));
+    const recursive = Boolean(operation.recursive);
+    const source = model[path];
+    if (!source) {
+      throw new Error(`FileNotFoundError:${path}`);
+    }
+    if (source.kind === "dir") {
+      if (!recursive) {
+        throw new Error(`RecursiveRequiredError:${path}`);
+      }
+      copyModelDirectory(model, path, dest);
+      return;
+    }
+    copyModelFile(model, path, dest);
+    return;
+  }
+  if (op === "mv") {
+    const dest = normalizePath(String(operation.dest));
+    const source = model[path];
+    if (!source) {
+      throw new Error(`FileNotFoundError:${path}`);
+    }
+    if (source.kind === "dir") {
+      copyModelDirectory(model, path, dest);
+      for (const candidate of descendantsOf(model, path).reverse()) {
+        if (candidate !== "/") delete model[candidate];
+      }
+      return;
+    }
+    copyModelFile(model, path, dest);
     delete model[path];
     return;
   }
@@ -178,6 +242,10 @@ function existingFiles(model: ModelState): string[] {
     .sort();
 }
 
+function copyDestination(path: string, dest: string): string {
+  return normalizePath(dest);
+}
+
 function randomName(rng: () => number, suffix = ""): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz";
   const length = 4 + Math.floor(rng() * 5);
@@ -204,6 +272,8 @@ function pickOperation(rng: () => number): string {
     ["read_text", 8],
     ["read_bytes", 6],
     ["grep", 8],
+    ["cp", 5],
+    ["mv", 5],
     ["rm", 8],
     ["ingest", 2],
   ];
@@ -236,6 +306,71 @@ async function verifySampledState(client: Parameters<typeof stat>[0], mount: str
       throw new Error(`stat mismatch for ${path}`);
     }
   }
+}
+
+async function liveCopy(
+  client: Parameters<typeof stat>[0],
+  mount: string,
+  src: string,
+  dest: string,
+  recursive: boolean,
+): Promise<void> {
+  const source = (await stat(client, mount, src)) as AnyObject | null;
+  if (!source) {
+    throw new Error(`FileNotFoundError:${src}`);
+  }
+  if (source.kind === "dir") {
+    if (!recursive) {
+      throw new Error(`RecursiveRequiredError:${src}`);
+    }
+    if (dest === src || dest.startsWith(`${src.replace(/\/$/, "")}/`)) {
+      throw new Error(`InvalidCopyTarget:${src}->${dest}`);
+    }
+    const rows = (await find(client, mount, src)) as AnyObject[];
+    for (const row of rows) {
+      const rowPath = String(row.path);
+      const suffix = rowPath === src ? "" : rowPath.slice(src.length);
+      const mapped = suffix === "" ? dest : normalizePath(`${dest.replace(/\/$/, "")}${suffix}`);
+      if (row.kind === "dir") {
+        await mkdir(client, mount, mapped);
+        continue;
+      }
+      const file = (await stat(client, mount, rowPath)) as AnyObject;
+      if (Number(file.is_text ?? 0) === 1) {
+        await putText(client, mount, mapped, String(await readText(client, mount, rowPath)), {
+          mime: typeof file.mime === "string" ? file.mime : undefined,
+        });
+      } else {
+        await putBytes(client, mount, mapped, (await readBytes(client, mount, rowPath)) as Uint8Array, {
+          mime: typeof file.mime === "string" ? file.mime : undefined,
+        });
+      }
+    }
+    return;
+  }
+  if (Number(source.is_text ?? 0) === 1) {
+    await putText(client, mount, dest, String(await readText(client, mount, src)), {
+      mime: typeof source.mime === "string" ? source.mime : undefined,
+    });
+    return;
+  }
+  await putBytes(client, mount, dest, (await readBytes(client, mount, src)) as Uint8Array, {
+    mime: typeof source.mime === "string" ? source.mime : undefined,
+  });
+}
+
+async function liveMove(
+  client: Parameters<typeof stat>[0],
+  mount: string,
+  src: string,
+  dest: string,
+): Promise<void> {
+  const source = (await stat(client, mount, src)) as AnyObject | null;
+  if (!source) {
+    throw new Error(`FileNotFoundError:${src}`);
+  }
+  await liveCopy(client, mount, src, dest, source.kind === "dir");
+  await rm(client, mount, src, source.kind === "dir");
 }
 
 export async function runDogfood(options: {
@@ -328,6 +463,25 @@ export async function runDogfood(options: {
         const expected = expectedGrepMatches(model, { root, pattern: "oauth", ignoreCase: true });
         if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`grep mismatch for ${root}`);
         log.push({ index, op: opName, root });
+      } else if (opName === "cp") {
+        const candidates = Object.keys(model).filter((path) => path !== "/");
+        if (candidates.length > 0) {
+          const path = candidates[Math.floor(rng() * candidates.length)]!;
+          const dest = copyDestination(path, newPathUnder(model, rng, model[path]?.kind === "file" ? ".copy" : ""));
+          const recursive = model[path]?.kind === "dir";
+          applyModelOperation(model, { op: "cp", path, dest, recursive });
+          await liveCopy(client, mount, path, dest, Boolean(recursive));
+          log.push({ index, op: opName, path, dest, recursive });
+        }
+      } else if (opName === "mv") {
+        const candidates = Object.keys(model).filter((path) => path !== "/");
+        if (candidates.length > 0) {
+          const path = candidates[Math.floor(rng() * candidates.length)]!;
+          const dest = copyDestination(path, newPathUnder(model, rng, model[path]?.kind === "file" ? ".moved" : ""));
+          applyModelOperation(model, { op: "mv", path, dest });
+          await liveMove(client, mount, path, dest);
+          log.push({ index, op: opName, path, dest });
+        }
       } else if (opName === "rm") {
         const candidates = Object.keys(model).filter((path) => path !== "/");
         if (candidates.length > 0) {
