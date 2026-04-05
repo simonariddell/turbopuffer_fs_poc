@@ -1,0 +1,38 @@
+{
+  "id": "csv-cleaning-v1",
+  "title": "Clean a sales CSV and produce a report",
+  "kind": "csv_cleaning",
+  "version": 1,
+  "entrypoint": "/TASK.md",
+  "workspace": {
+    "entrypoint": "/TASK.md",
+    "bundle_manifest": "/bundle.json",
+    "session_state": "/state/session.json",
+    "logs_dir": "/logs",
+    "output_dir": "/output",
+    "scratch_dir": "/scratch",
+    "project_dir": "/project",
+    "input_dir": "/data"
+  },
+  "allowed_outputs": [
+    "/output/sales.cleaned.csv",
+    "/output/cleaning_report.md",
+    "/logs/run.jsonl",
+    "/logs/summary.md"
+  ],
+  "expected_inputs": [
+    "/data/dirty_sales.csv",
+    "/docs/context.md"
+  ],
+  "suggested_checks": [
+    "output_exists:/output/sales.cleaned.csv",
+    "output_exists:/output/cleaning_report.md",
+    "log_exists:/logs/run.jsonl",
+    "log_exists:/logs/summary.md"
+  ],
+  "tags": [
+    "csv",
+    "cleanup",
+    "report"
+  ]
+}

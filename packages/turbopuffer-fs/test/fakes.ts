@@ -1,0 +1,169 @@
+import type { AnyObject } from "../src/types.js";
+
+export class ModelLike {
+  readonly payload: unknown;
+
+  constructor(payload: unknown) {
+    this.payload = payload;
+  }
+
+  model_dump(): unknown {
+    return this.payload;
+  }
+}
+
+export class FakeQueryResponse {
+  readonly rows: AnyObject[];
+  readonly billing: AnyObject;
+  readonly performance: AnyObject;
+  readonly aggregations: unknown;
+  readonly aggregation_groups: unknown;
+
+  constructor(options: {
+    rows?: AnyObject[];
+    billing?: AnyObject;
+    performance?: AnyObject;
+    aggregations?: unknown;
+    aggregationGroups?: unknown;
+  } = {}) {
+    this.rows = [...(options.rows ?? [])];
+    this.billing = options.billing ?? { units: 1 };
+    this.performance = options.performance ?? { latency_ms: 1 };
+    this.aggregations = options.aggregations;
+    this.aggregation_groups = options.aggregationGroups;
+  }
+}
+
+export class FakeWriteResponse {
+  readonly payload: AnyObject;
+
+  constructor(payload: AnyObject = {}) {
+    this.payload = {
+      status: "OK",
+      message: "ok",
+      rows_affected: 0,
+      ...payload,
+    };
+  }
+
+  model_dump(): AnyObject {
+    return { ...this.payload };
+  }
+}
+
+export class FakeNamespaceList implements AsyncIterable<{ id: string }> {
+  readonly namespaces: Array<{ id: string }>;
+  readonly next_cursor: string | null;
+
+  constructor(namespaces: Array<{ id: string }>, nextCursor: string | null = null) {
+    this.namespaces = namespaces.map((namespace) => ({ ...namespace }));
+    this.next_cursor = nextCursor;
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<{ id: string }> {
+    for (const namespace of this.namespaces) {
+      yield { ...namespace };
+    }
+  }
+}
+
+type QueryResponseFactory = (payload: AnyObject) => unknown;
+type WriteResponseFactory = (payload: AnyObject) => unknown;
+
+export class FakeNamespace {
+  readonly name: string;
+  readonly queryCalls: AnyObject[] = [];
+  readonly writeCalls: AnyObject[] = [];
+  private readonly queryResponses: Array<unknown | QueryResponseFactory>;
+  private readonly writeResponses: Array<unknown | WriteResponseFactory>;
+
+  constructor(
+    name: string,
+    options: {
+      queryResponses?: Array<unknown | QueryResponseFactory>;
+      writeResponses?: Array<unknown | WriteResponseFactory>;
+    } = {},
+  ) {
+    this.name = name;
+    this.queryResponses = [...(options.queryResponses ?? [])];
+    this.writeResponses = [...(options.writeResponses ?? [])];
+  }
+
+  async query(payload: AnyObject): Promise<unknown> {
+    this.queryCalls.push({ ...payload });
+    const response = this.queryResponses.shift();
+    if (typeof response === "function") {
+      return (response as QueryResponseFactory)({ ...payload });
+    }
+    return response ?? new FakeQueryResponse();
+  }
+
+  async write(payload: AnyObject): Promise<unknown> {
+    this.writeCalls.push({ ...payload });
+    const response = this.writeResponses.shift();
+    if (typeof response === "function") {
+      return (response as WriteResponseFactory)({ ...payload });
+    }
+    if (response !== undefined) {
+      return response;
+    }
+    const deletes = Array.isArray(payload.deletes) ? payload.deletes : [];
+    const upserts = Array.isArray(payload.upsert_rows) ? payload.upsert_rows : [];
+    return new FakeWriteResponse({
+      rows_affected: deletes.length + upserts.length,
+      rows_deleted: deletes.length || undefined,
+      rows_upserted: upserts.length || undefined,
+      deleted_ids: deletes.length > 0 ? deletes : undefined,
+      upserted_ids: upserts.length > 0 ? upserts.map((row) => (row as AnyObject).id) : undefined,
+    });
+  }
+
+  async deleteAll(): Promise<void> {
+    return undefined;
+  }
+}
+
+export class FakeClient {
+  readonly namespaceCalls: string[] = [];
+  readonly namespaceListCalls: AnyObject[] = [];
+  private readonly namespaceHandles: Map<string, FakeNamespace>;
+  private readonly namespaceLists: Array<FakeNamespaceList>;
+
+  constructor(options: {
+    namespaces?: Record<string, FakeNamespace>;
+    namespaceIds?: string[];
+    namespaceLists?: FakeNamespaceList[];
+  } = {}) {
+    this.namespaceHandles = new Map(Object.entries(options.namespaces ?? {}));
+    this.namespaceLists = options.namespaceLists
+      ? [...options.namespaceLists]
+      : options.namespaceIds
+        ? [new FakeNamespaceList(options.namespaceIds.map((id) => ({ id })))]
+        : [];
+  }
+
+  namespace(name: string): FakeNamespace {
+    this.namespaceCalls.push(name);
+    const existing = this.namespaceHandles.get(name);
+    if (existing) {
+      return existing;
+    }
+    const created = new FakeNamespace(name);
+    this.namespaceHandles.set(name, created);
+    return created;
+  }
+
+  async namespaces(payload: AnyObject = {}): Promise<FakeNamespaceList> {
+    this.namespaceListCalls.push({ ...payload });
+    return this.namespaceLists.shift() ?? new FakeNamespaceList([]);
+  }
+}
+
+export class NotFoundError extends Error {
+  readonly status = 404;
+
+  constructor(message = "namespace not found") {
+    super(message);
+    this.name = "NotFoundError";
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "id": "code-maintenance-v1",
+  "title": "Implement CSV normalization in a small Python module",
+  "kind": "code_maintenance",
+  "version": 1,
+  "entrypoint": "/TASK.md",
+  "workspace": {
+    "entrypoint": "/TASK.md",
+    "bundle_manifest": "/bundle.json",
+    "session_state": "/state/session.json",
+    "logs_dir": "/logs",
+    "output_dir": "/output",
+    "scratch_dir": "/scratch",
+    "project_dir": "/project",
+    "input_dir": "/data",
+    "default_cwd": "/project"
+  },
+  "allowed_outputs": [
+    "/project/src/transform.py",
+    "/project/tests/test_transform.py",
+    "/output/change_report.md",
+    "/logs/run.jsonl",
+    "/logs/summary.md"
+  ],
+  "expected_inputs": [
+    "/project/src/transform.py",
+    "/project/tests/test_transform.py",
+    "/data/sample.csv"
+  ],
+  "suggested_checks": [
+    "output_exists:/project/src/transform.py",
+    "output_exists:/project/tests/test_transform.py",
+    "output_exists:/output/change_report.md",
+    "log_exists:/logs/run.jsonl"
+  ],
+  "tags": [
+    "code",
+    "tests",
+    "csv"
+  ]
+}

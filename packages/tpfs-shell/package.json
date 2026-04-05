@@ -1,0 +1,20 @@
+{
+  "name": "@workspace/tpfs-shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:agent": "vitest run test/task-bundle-harness.test.ts",
+    "test:conformance": "vitest run test/adapter.test.ts test/conformance.test.ts test/shell.test.ts",
+    "test:restart": "vitest run test/restart-harness.test.ts"
+  },
+  "dependencies": {
+    "@workspace/turbopuffer-fs": "workspace:*",
+    "just-bash": "^2.14.0"
+  }
+}

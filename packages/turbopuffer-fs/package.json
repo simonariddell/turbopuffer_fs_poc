@@ -1,0 +1,27 @@
+{
+  "name": "@workspace/turbopuffer-fs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "tpfs": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:conformance": "vitest run test/plans.test.ts test/finalize.test.ts test/runtime.test.ts test/workspace.test.ts",
+    "test:search-evals": "vitest run test/grep-eval.test.ts"
+  },
+  "dependencies": {
+    "@turbopuffer/turbopuffer": "^1.21.0"
+  }
+}

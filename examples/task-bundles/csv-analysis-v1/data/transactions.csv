@@ -1,0 +1,7 @@
+transaction_id,customer,order_date,amount_usd
+t001,Ada,2026-01-03,120.50
+t002,Grace,2026-01-10,88.00
+t003,Ada,2026-02-02,19.50
+t004,Linus,2026-02-09,300.00
+t005,Grace,2026-02-11,20.00
+t006,Dorothy,2026-03-01,42.25
