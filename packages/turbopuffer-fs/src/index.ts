@@ -10,3 +10,4 @@ export * from "./workspace.js";
 export * from "./ingest.js";
 export * from "./bundles.js";
 export * from "./dogfood.js";
+export * from "./cli.js";

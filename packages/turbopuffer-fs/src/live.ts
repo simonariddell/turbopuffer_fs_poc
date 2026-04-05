@@ -16,6 +16,7 @@ import {
   tailPlan,
 } from "./plans.js";
 import { run } from "./runtime.js";
+export { ingestDirectory } from "./ingest.js";
 
 export const MOUNT_SUFFIX = "__fs";
 

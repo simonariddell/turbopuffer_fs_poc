@@ -24,17 +24,22 @@ const enabled =
 const describeLive = enabled ? describe : describe.skip;
 
 describeLive("live turbopuffer", () => {
-  const client = makeClient({
-    apiKey: process.env.TURBOPUFFER_API_KEY,
-    region: process.env.TURBOPUFFER_REGION,
-    baseURL: process.env.TURBOPUFFER_BASE_URL,
-  });
+  let client: ReturnType<typeof makeClient>;
   const mount = `tslive${Math.random().toString(16).slice(2, 10)}`;
   const namespace = mountNamespace(mount);
 
+  if (enabled) {
+    client = makeClient({
+      apiKey: process.env.TURBOPUFFER_API_KEY,
+      region: process.env.TURBOPUFFER_REGION,
+      baseURL: process.env.TURBOPUFFER_BASE_URL,
+    });
+  }
+
   afterAll(async () => {
+    if (!enabled) return;
     try {
-      await client.namespace(namespace).deleteAll();
+      await client!.namespace(namespace).deleteAll();
     } catch {
       // ignore cleanup failures
     }

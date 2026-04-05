@@ -149,6 +149,8 @@ export function resolveUserPath(userPath: string | null | undefined, options: { 
   return current;
 }
 
+export const resolveCliPath = resolveUserPath;
+
 export async function workspaceInit(
   client: Parameters<typeof stat>[0],
   mount: string,

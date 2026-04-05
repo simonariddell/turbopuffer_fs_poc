@@ -39,6 +39,8 @@ export function bundleWorkspaceConfig(spec: BundleSpec): WorkspaceConfig {
   return resolveWorkspaceConfig({ bundleSpec: spec });
 }
 
+export const bundleConfig = bundleWorkspaceConfig;
+
 export async function bundleTaskPrompt(localRoot: string): Promise<string> {
   const spec = await loadBundleSpec(localRoot);
   const workspace = bundleWorkspaceConfig(spec);
