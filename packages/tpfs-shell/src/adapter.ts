@@ -11,6 +11,8 @@ import type {
 import type { Turbopuffer } from "@turbopuffer/turbopuffer";
 import {
   ancestorPaths,
+  basename as tpfsBasename,
+  find,
   ls,
   mkdir,
   putBytes,
@@ -47,6 +49,11 @@ function decodeContent(content: Uint8Array, encoding: BufferEncoding = "utf8"): 
 function childName(path: string): string {
   if (path === "/") return "/";
   return path.split("/").filter(Boolean).at(-1) ?? path;
+}
+
+function isSameOrDescendantPath(root: string, candidate: string): boolean {
+  const prefix = `${root.replace(/\/$/, "")}/`;
+  return candidate === root || candidate.startsWith(prefix);
 }
 
 function toFsStat(row: Record<string, unknown>): FsStat {
@@ -108,6 +115,95 @@ export class TpufFsAdapter implements IFileSystem {
     }
     this.pathInventory.delete(path);
     this.pathInventory.add("/");
+  }
+
+  private async resolveCopyDestination(src: string, dest: string): Promise<string> {
+    const existing = (await stat(this.client, this.mount, dest)) as Record<string, unknown> | null;
+    if (existing?.kind === "dir") {
+      const name = tpfsBasename(src);
+      return dest === "/" ? `/${name}` : `${dest.replace(/\/$/, "")}/${name}`;
+    }
+    return dest;
+  }
+
+  private async existingRow(path: string): Promise<Record<string, unknown> | null> {
+    return (await stat(this.client, this.mount, path)) as Record<string, unknown> | null;
+  }
+
+  private async requireExistingRow(path: string, operation: "cp" | "mv"): Promise<Record<string, unknown>> {
+    const row = await this.existingRow(path);
+    if (!row) {
+      throw new Error(`ENOENT: no such file or directory, ${operation} '${path}'`);
+    }
+    return row;
+  }
+
+  private async ensureNoClobberDest(
+    dest: string,
+    enabled: boolean,
+    operation: "cp" | "mv",
+  ): Promise<void> {
+    if (!enabled) {
+      return;
+    }
+    const row = await this.existingRow(dest);
+    if (row !== null) {
+      throw invalidTpfsOperation(
+        operation,
+        `${operation} with no-clobber cannot overwrite existing destination ${dest}.`,
+        {
+          alternatives: [
+            `retry ${operation} with a new destination path`,
+            `drop the no-clobber option if replacement is intended`,
+          ],
+          specSections: ["§8", "§12"],
+        },
+      );
+    }
+  }
+
+  private async copyFileAbsolute(src: string, dest: string, source?: Record<string, unknown>): Promise<void> {
+    const sourceRow = source ?? ((await stat(this.client, this.mount, src)) as Record<string, unknown> | null);
+    if (!sourceRow || sourceRow.kind !== "file") {
+      throw invalidTpfsOperation("cp", `cp expected a file source at ${src}.`, {
+        specSections: ["§8", "§12"],
+      });
+    }
+    const mime = typeof sourceRow.mime === "string" ? sourceRow.mime : undefined;
+    if (Number(sourceRow.is_text ?? 0) === 1) {
+      const text = await readText(this.client, this.mount, src);
+      await putText(this.client, this.mount, dest, String(text), { mime });
+      this.rememberPath(dest);
+      return;
+    }
+    const bytes = (await readBytes(this.client, this.mount, src)) as Uint8Array;
+    await putBytes(this.client, this.mount, dest, bytes, { mime });
+    this.rememberPath(dest);
+  }
+
+  private async copyDirectoryAbsolute(src: string, dest: string): Promise<void> {
+    if (isSameOrDescendantPath(src, dest)) {
+      throw invalidTpfsOperation(
+        "cp",
+        `cp cannot copy a directory into itself or its own descendant (${src} -> ${dest}).`,
+        {
+          alternatives: ["copy the directory to a path outside the source subtree"],
+          specSections: ["§8", "§12", "§13"],
+        },
+      );
+    }
+    const rows = (await find(this.client, this.mount, src)) as Array<Record<string, unknown>>;
+    for (const row of rows) {
+      const rowPath = String(row.path);
+      const suffix = rowPath === src ? "" : rowPath.slice(src.length);
+      const mapped = suffix === "" ? dest : `${dest.replace(/\/$/, "")}${suffix}`;
+      if (row.kind === "dir") {
+        await mkdir(this.client, this.mount, mapped);
+        this.rememberPath(mapped);
+        continue;
+      }
+      await this.copyFileAbsolute(rowPath, mapped);
+    }
   }
 
   async readFile(path: string, options?: ReadFileOptions | BufferEncoding): Promise<string> {
@@ -228,29 +324,62 @@ export class TpufFsAdapter implements IFileSystem {
     this.forgetPath(resolved, options?.recursive ?? false);
   }
 
-  async cp(_src: string, _dest: string, _options?: CpOptions): Promise<void> {
-    throw notYetImplemented(
-      "cp",
-      "Durable copy semantics are not implemented yet for the tpfs adapter.",
-      {
-        alternatives: [
-          "copy file contents explicitly with readFile/readFileBuffer plus writeFile",
-          "copy directory trees through supported tpfs operations until native cp is implemented",
-        ],
-      },
-    );
+  async cp(srcInput: string, destInput: string, options?: CpOptions): Promise<void> {
+    const src = await this.resolveVirtualPath(srcInput);
+    const dest = await this.resolveVirtualPath(destInput);
+    const source = await this.requireExistingRow(src, "cp");
+    const resolvedDest = await this.resolveCopyDestination(src, dest);
+    await this.ensureNoClobberDest(resolvedDest, false, "cp");
+
+    if (source.kind === "dir") {
+      if (!options?.recursive) {
+        throw invalidTpfsOperation(
+          "cp",
+          `cp requires recursive:true when copying directories (${srcInput}).`,
+          {
+            alternatives: ["retry cp with recursive:true for directory copies"],
+            specSections: ["§8", "§12"],
+          },
+        );
+      }
+      await this.copyDirectoryAbsolute(src, resolvedDest);
+      return;
+    }
+    await this.copyFileAbsolute(src, resolvedDest, source);
   }
 
-  async mv(_src: string, _dest: string): Promise<void> {
-    throw notYetImplemented(
-      "mv",
-      "Durable move semantics are not implemented yet for the tpfs adapter.",
-      {
-        alternatives: [
-          "copy durable content to the new path and delete the old path explicitly",
-        ],
-      },
-    );
+  async mv(srcInput: string, destInput: string): Promise<void> {
+    const src = await this.resolveVirtualPath(srcInput);
+    const dest = await this.resolveVirtualPath(destInput);
+    if (src === "/") {
+      throw invalidTpfsOperation("mv", "mv cannot target the root path.", {
+        specSections: ["§8.12", "§13"],
+      });
+    }
+    const source = await this.requireExistingRow(src, "mv");
+    const resolvedDest = await this.resolveCopyDestination(src, dest);
+    if (source.kind === "dir" && isSameOrDescendantPath(src, resolvedDest)) {
+      throw invalidTpfsOperation(
+        "mv",
+        `mv cannot move a directory into itself or its own descendant (${srcInput} -> ${destInput}).`,
+        {
+          alternatives: ["move the directory to a path outside the source subtree"],
+          specSections: ["§12", "§13"],
+        },
+      );
+    }
+    if (resolvedDest === src) {
+      return;
+    }
+    if (source.kind === "dir") {
+      await this.copyDirectoryAbsolute(src, resolvedDest);
+      await rm(this.client, this.mount, src, true);
+      this.forgetPath(src, true);
+      return;
+    }
+    await this.copyFileAbsolute(src, resolvedDest, source);
+    await rm(this.client, this.mount, src, false);
+    this.forgetPath(src, false);
   }
 
   resolvePath(base: string, target: string): string {

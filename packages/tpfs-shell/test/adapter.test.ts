@@ -23,6 +23,7 @@ const fsApi = vi.hoisted(() => ({
   mkdir: vi.fn(),
   rm: vi.fn(),
   find: vi.fn(),
+  basename: vi.fn((value: string) => value.split("/").filter(Boolean).at(-1) ?? "/"),
   resolveUserPath: vi.fn(),
 }));
 
@@ -100,8 +101,8 @@ describe("TpufFsAdapter", () => {
       cwdProvider: async () => "/project",
     });
 
-    await expect(adapter.cp("a", "b")).rejects.toThrow("TPFS_NOT_YET_IMPLEMENTED");
-    await expect(adapter.cp("a", "b")).rejects.toThrow("SPEC.tpfs.md");
+    fsApi.stat.mockResolvedValue(null);
+    await expect(adapter.cp("a", "b")).rejects.toThrow("ENOENT");
     await expect(adapter.symlink("a", "b")).rejects.toThrow("TPFS_UNSUPPORTED_BY_DESIGN");
     await expect(adapter.symlink("a", "b")).rejects.toThrow("non-POSIX-complete filesystem-shaped runtime");
   });
@@ -142,5 +143,76 @@ describe("TpufFsAdapter", () => {
 
     await expect(adapter.appendFile("notes", "world")).rejects.toThrow("TPFS_INVALID_OPERATION");
     await expect(adapter.appendFile("notes", "world")).rejects.toThrow("appendFile cannot target a directory");
+  });
+
+  it("copies files durably", async () => {
+    fsApi.stat.mockImplementation(async (_client: unknown, _mount: string, path: string) => {
+      if (path === "/project/source.txt") {
+        return { kind: "file", is_text: 1, mime: "text/plain" };
+      }
+      return null;
+    });
+    fsApi.readText.mockResolvedValue("copied");
+
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+    });
+
+    await adapter.cp("source.txt", "dest.txt");
+
+    expect(fsApi.putText).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      "/project/dest.txt",
+      "copied",
+      { mime: "text/plain" },
+    );
+  });
+
+  it("requires recursive copy for directories", async () => {
+    fsApi.stat.mockImplementation(async (_client: unknown, _mount: string, path: string) => {
+      if (path === "/project/srcdir") {
+        return { kind: "dir" };
+      }
+      return null;
+    });
+
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+    });
+
+    await expect(adapter.cp("srcdir", "destdir")).rejects.toThrow("TPFS_INVALID_OPERATION");
+    await expect(adapter.cp("srcdir", "destdir")).rejects.toThrow("recursive:true");
+  });
+
+  it("moves files durably", async () => {
+    fsApi.stat.mockImplementation(async (_client: unknown, _mount: string, path: string) => {
+      if (path === "/project/source.txt") {
+        return { kind: "file", is_text: 1, mime: "text/plain" };
+      }
+      return null;
+    });
+    fsApi.readText.mockResolvedValue("moved");
+
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+    });
+
+    await adapter.mv("source.txt", "dest.txt");
+
+    expect(fsApi.putText).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      "/project/dest.txt",
+      "moved",
+      { mime: "text/plain" },
+    );
+    expect(fsApi.rm).toHaveBeenCalledWith(expect.anything(), "documents", "/project/source.txt", false);
   });
 });
