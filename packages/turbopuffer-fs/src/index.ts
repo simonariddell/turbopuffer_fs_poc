@@ -6,3 +6,4 @@ export * from "./runtime.js";
 export * from "./finalize.js";
 export * from "./live.js";
 export * from "./checks.js";
+export * from "./workspace.js";
