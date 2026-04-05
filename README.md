@@ -233,6 +233,34 @@ This runner:
 - checks invariants as it goes
 - can emit replayable failure artifacts with `--artifact-dir`
 
+## TypeScript runtime and durable shell
+
+The repository now also contains a TypeScript workspace under `packages/`:
+
+- `packages/turbopuffer-fs`
+  - the TypeScript rewrite of the core filesystem wrapper
+- `packages/tpfs-shell`
+  - a durable `just-bash`-based shell runtime layered over the TypeScript core
+
+Useful workspace commands:
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm --filter @workspace/turbopuffer-fs test
+pnpm --filter @workspace/tpfs-shell test
+```
+
+The shell runtime is designed so that:
+- `just-bash` provides shell semantics
+- `turbopuffer-fs` provides the durable filesystem semantics
+- workspace state such as `cwd` is persisted in `/state/session.json`
+- command logs are persisted in `/logs/run.jsonl`
+
+This means an agent can restart on another machine and recover its workspace
+state from turbopuffer-backed storage instead of relying on local process or
+disk state.
+
 ## Deployment-configurable workspaces
 
 Agent workspaces can use deployment or bundle-specific conventions instead of a
