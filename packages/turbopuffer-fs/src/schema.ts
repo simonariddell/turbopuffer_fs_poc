@@ -62,7 +62,16 @@ export function fsSchema(): FsSchema {
     mime: "string",
     size_bytes: "uint",
     is_text: "uint",
-    text: { type: "string", regex: true, filterable: true },
+    text: {
+      type: "string",
+      regex: true,
+      filterable: true,
+      full_text_search: {
+        tokenizer: "word_v3",
+        remove_stopwords: false,
+        stemming: false,
+      },
+    },
     blob_b64: { type: "string", filterable: false },
     sha256: "string",
     source_mtime_ns: "uint",

@@ -209,4 +209,47 @@ describe("cli", () => {
       { mime: undefined },
     );
   });
+
+  it("supports regex and bm25 grep modes", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
+    const grepSpy = vi.spyOn(live, "grep").mockResolvedValue([
+      { kind: "search_hit", mode: "bm25", path: "/project/readme.md", score: 12.3, snippet: "oauth token" },
+    ] as never);
+
+    const regexIo = createIo();
+    expect(
+      await runCli(["grep", "documents", ".", "oauth.*token", "--mode", "regex", "--ignore-case"], regexIo.io),
+    ).toBe(0);
+    expect(grepSpy).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "documents",
+      "/project",
+      "oauth.*token",
+      expect.objectContaining({ mode: "regex", ignoreCase: true }),
+    );
+
+    const bm25Io = createIo();
+    expect(
+      await runCli(["grep", "documents", ".", "oauth token", "--mode", "bm25", "--last-as-prefix"], bm25Io.io),
+    ).toBe(0);
+    expect(grepSpy).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "documents",
+      "/project",
+      "oauth token",
+      expect.objectContaining({ mode: "bm25", lastAsPrefix: true }),
+    );
+    expect(JSON.parse(bm25Io.stdout.join(""))[0]).toMatchObject({
+      kind: "search_hit",
+      mode: "bm25",
+      path: "/project/readme.md",
+    });
+  });
 });

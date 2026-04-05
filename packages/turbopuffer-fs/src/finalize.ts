@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 
+import { finalizeBm25Grep, finalizeLiteralGrep, finalizeRegexGrep } from "./grep.js";
 import type { AnyObject, ExecuteResults, RowLike, WriteResult } from "./types.js";
 import { contentRow, metadataRow } from "./schema.js";
 
@@ -105,12 +106,9 @@ export const FINALIZERS = {
     const count = Number(context.n);
     return count === 0 ? [] : lines.slice(-count);
   },
-  grep: (context: AnyObject, results: ExecuteResults) => {
-    requireTarget(results, String(context.root));
-    return rows(results, "candidates").flatMap((value) =>
-      grepMatches(value, String(context.pattern ?? ""), Boolean(context.ignoreCase ?? context.ignore_case)),
-    );
-  },
+  grep: (context: AnyObject, results: ExecuteResults) => finalizeLiteralGrep(context, results as never),
+  grep_regex: (context: AnyObject, results: ExecuteResults) => finalizeRegexGrep(context, results as never),
+  grep_bm25: (context: AnyObject, results: ExecuteResults) => finalizeBm25Grep(context, results as never),
   write_summary: (_context: AnyObject, results: ExecuteResults) => {
     const { name: _name, ...value } = (results.write ?? {}) as WriteResult;
     return value;

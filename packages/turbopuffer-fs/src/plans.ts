@@ -18,6 +18,7 @@ import {
   textRow,
   upsertRowsPayload,
 } from "./schema.js";
+import { buildGrepPlan } from "./grep.js";
 import type { Plan, PlanStep, FsRow } from "./types.js";
 
 export const DEFAULT_PAGE_SIZE = 256;
@@ -191,39 +192,16 @@ export const grepPlan = (
   root: string,
   pattern: string,
   options: {
+    mode?: "literal" | "regex" | "bm25";
     ignoreCase?: boolean;
     glob?: string | null;
     limit?: number | null;
+    multiline?: boolean;
+    dotAll?: boolean;
+    lastAsPrefix?: boolean;
   } = {},
 ): Plan => {
-  if (pattern === "") throw new Error("pattern must not be empty");
-  const value = normalizePath(root);
-  const ignoreCase = options.ignoreCase ?? false;
-  const filters = andFilter<unknown>(
-    ["kind", "Eq", "file"],
-    ["is_text", "Eq", 1],
-    subtreeFilter(value),
-    scopedGlobFilter(value, options.glob ?? null, { ignoreCase }),
-    textSubstringFilter(pattern, { ignoreCase }),
-  );
-  return plan(
-    namespace,
-    [
-      queryStep("target", lookupPayload(value, META_FIELDS)),
-      queryStep("candidates", orderedPayload(filters, ["path", "text"]), {
-        paginate: true,
-        limit: options.limit,
-      }),
-    ],
-    "grep",
-    {
-      root: value,
-      pattern,
-      ignoreCase,
-      glob: options.glob ?? null,
-      limit: limitValue(options.limit),
-    },
-  );
+  return buildGrepPlan(namespace, root, pattern, options);
 };
 
 export const mkdirPlan = (namespace: string, path: string): Plan => {

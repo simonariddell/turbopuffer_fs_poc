@@ -87,8 +87,8 @@ describe("finalizers", () => {
       },
     );
     expect(matches).toEqual([
-      { path: "/notes/a.txt", line_number: 1, line: "oauth token" },
-      { path: "/notes/a.txt", line_number: 3, line: "OAuth done" },
+      { kind: "line_match", path: "/notes/a.txt", line_number: 1, line: "oauth token" },
+      { kind: "line_match", path: "/notes/a.txt", line_number: 3, line: "OAuth done" },
     ]);
 
     expect(FINALIZERS.rm({ path: "/notes/missing", recursive: false }, { target: { name: "target", rows: [] } })).toEqual({
@@ -97,6 +97,46 @@ describe("finalizers", () => {
       deleted: false,
       ids: [],
     });
+  });
+
+  it("matches regex grep rows locally", () => {
+    const matches = FINALIZERS.grep_regex(
+      { root: "/notes", pattern: "^OAuth", ignoreCase: true, multiline: false, dotAll: false },
+      {
+        target: { name: "target", rows: [directoryRow("/notes")] },
+        candidates: {
+          name: "candidates",
+          rows: [
+            { path: "/notes/a.txt", text: "oauth token\nother\nOAuth done" },
+            { path: "/notes/b.txt", text: "different" },
+          ],
+        },
+      },
+    );
+    expect(matches).toEqual([
+      { kind: "line_match", path: "/notes/a.txt", line_number: 1, line: "oauth token" },
+      { kind: "line_match", path: "/notes/a.txt", line_number: 3, line: "OAuth done" },
+    ]);
+  });
+
+  it("returns bm25-style search hits", () => {
+    const matches = FINALIZERS.grep_bm25(
+      { root: "/notes", pattern: "oauth", ignoreCase: true },
+      {
+        target: { name: "target", rows: [directoryRow("/notes")] },
+        candidates: {
+          name: "candidates",
+          rows: [
+            { path: "/notes/a.txt", text: "oauth token\nother", $dist: 1.5 },
+            { path: "/notes/b.txt", text: "different", $dist: 0.5 },
+          ],
+        },
+      },
+    );
+    expect(matches).toEqual([
+      { kind: "search_hit", mode: "bm25", path: "/notes/a.txt", score: 1.5, snippet: "oauth token" },
+      { kind: "search_hit", mode: "bm25", path: "/notes/b.txt", score: 0.5, snippet: "different" },
+    ]);
   });
 
   it("exposes content helpers", () => {

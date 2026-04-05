@@ -17,6 +17,7 @@ import {
 } from "./plans.js";
 import { run } from "./runtime.js";
 export { ingestDirectory } from "./ingest.js";
+import type { GrepOptions } from "./types.js";
 
 export const MOUNT_SUFFIX = "__fs";
 
@@ -102,7 +103,7 @@ export function grep(
   mount: string,
   root: string,
   pattern: string,
-  options: { ignoreCase?: boolean; glob?: string; limit?: number } = {},
+  options: GrepOptions = {},
 ) {
   return runPlan(
     client,
@@ -110,6 +111,10 @@ export function grep(
       ignoreCase: options.ignoreCase,
       glob: options.glob,
       limit: options.limit,
+      mode: options.mode,
+      multiline: options.multiline,
+      dotAll: options.dotAll,
+      lastAsPrefix: options.lastAsPrefix,
     }),
   );
 }

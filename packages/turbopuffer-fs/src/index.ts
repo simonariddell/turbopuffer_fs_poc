@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./paths.js";
 export * from "./schema.js";
 export * from "./plans.js";
+export * from "./grep.js";
 export * from "./runtime.js";
 export * from "./finalize.js";
 export * from "./live.js";

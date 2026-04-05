@@ -7,6 +7,35 @@ export type Row = RowLike;
 export type FsRow = RowLike;
 export type FsSchema = Record<string, unknown>;
 
+export type GrepMode = "literal" | "regex" | "bm25";
+
+export interface GrepOptions {
+  mode?: GrepMode;
+  glob?: string | null;
+  limit?: number | null;
+  ignoreCase?: boolean;
+  multiline?: boolean;
+  dotAll?: boolean;
+  lastAsPrefix?: boolean;
+}
+
+export interface GrepLineMatch extends AnyObject {
+  kind: "line_match";
+  path: string;
+  line_number: number;
+  line: string;
+}
+
+export interface GrepSearchHit extends AnyObject {
+  kind: "search_hit";
+  mode: "bm25";
+  path: string;
+  score: number;
+  snippet?: string;
+}
+
+export type GrepResult = GrepLineMatch[] | GrepSearchHit[];
+
 export interface QueryStep {
   kind: "query";
   name: string;

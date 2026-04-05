@@ -67,7 +67,20 @@ describeLive("live turbopuffer", () => {
     );
 
     const grepMatches = (await grep(client, mount, "/", "oauth", { ignoreCase: true })) as Array<Record<string, unknown>>;
-    expect(grepMatches).toEqual([{ path: "/notes/hello.txt", line_number: 2, line: "oauth token" }]);
+    expect(grepMatches).toEqual([{ kind: "line_match", path: "/notes/hello.txt", line_number: 2, line: "oauth token" }]);
+
+    const regexMatches = (await grep(client, mount, "/", "^oauth.*$", {
+      mode: "regex",
+      ignoreCase: true,
+    })) as Array<Record<string, unknown>>;
+    expect(regexMatches).toEqual([{ kind: "line_match", path: "/notes/hello.txt", line_number: 2, line: "oauth token" }]);
+
+    const rankedMatches = (await grep(client, mount, "/", "oauth token", {
+      mode: "bm25",
+      limit: 3,
+    })) as Array<Record<string, unknown>>;
+    expect(rankedMatches[0]?.path).toBe("/notes/hello.txt");
+    expect(rankedMatches[0]?.kind).toBe("search_hit");
 
     await rm(client, mount, "/notes", true);
     await rm(client, mount, "/bin", true);

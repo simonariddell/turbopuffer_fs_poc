@@ -304,13 +304,20 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
         break;
       }
       case "grep": {
-        const [mount, root, pattern] = parsed.positionals;
-        if (!mount || !root || !pattern) throw new Error("grep requires <mount> <root> <pattern>");
+        const [mount, root, rawPattern] = parsed.positionals;
+        if (!mount || !root) throw new Error("grep requires <mount> <root> <pattern-or-query>");
         const cwd = await workspacePwd(client, mount, workspaceConfig);
+        const mode = typeof parsed.flags.mode === "string" ? parsed.flags.mode : "literal";
+        const pattern = rawPattern ?? (typeof parsed.flags.query === "string" ? parsed.flags.query : undefined);
+        if (!pattern) throw new Error("grep requires a pattern or query");
         result = await grep(client, mount, resolveCliPath(root, { cwd }), pattern, {
+          mode: mode as "literal" | "regex" | "bm25",
           glob: typeof parsed.flags.glob === "string" ? parsed.flags.glob : undefined,
           ignoreCase: Boolean(parsed.flags["ignore-case"]),
           limit: typeof parsed.flags.limit === "string" ? Number(parsed.flags.limit) : undefined,
+          multiline: Boolean(parsed.flags.multiline),
+          dotAll: Boolean(parsed.flags.dotall),
+          lastAsPrefix: Boolean(parsed.flags["last-as-prefix"]),
         });
         break;
       }

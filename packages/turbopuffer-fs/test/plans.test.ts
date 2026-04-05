@@ -70,6 +70,39 @@ describe("plans", () => {
     expect(filters).toContainEqual(["text", "IGlob", "*oauth*"]);
   });
 
+  it("builds regex grep plans without coarse text substring filters", () => {
+    const plan = grepPlan("documents__fs", "/notes", "oauth.*token", {
+      mode: "regex",
+      ignoreCase: true,
+      glob: "*.md",
+      limit: 25,
+    });
+    const candidates = asQueryStep(plan.steps[1]!);
+    const filters = (candidates.payload.filters as [string, unknown[]])[1];
+    expect(plan.finalize).toBe("grep_regex");
+    expect(filters).toContainEqual(["kind", "Eq", "file"]);
+    expect(filters).toContainEqual(["is_text", "Eq", 1]);
+    expect(filters).toContainEqual(["basename", "IGlob", "*.md"]);
+    expect(filters).not.toContainEqual(["text", "IGlob", "*oauth.*token*"]);
+    expect(candidates).toMatchObject({
+      paginate: true,
+      limit: 25,
+    });
+  });
+
+  it("builds bm25 grep plans with ranked top-k queries", () => {
+    const plan = grepPlan("documents__fs", "/notes", "oauth token", {
+      mode: "bm25",
+      limit: 7,
+      lastAsPrefix: true,
+    });
+    const candidates = asQueryStep(plan.steps[1]!);
+    expect(plan.finalize).toBe("grep_bm25");
+    expect(candidates.payload.top_k).toBe(7);
+    expect(candidates.payload.rank_by).toEqual(["text", "BM25", "oauth token", { last_as_prefix: true }]);
+    expect(candidates.payload.include_attributes).toEqual(["path", "text"]);
+  });
+
   it("builds read plans with correct finalizers", () => {
     expect(readTextPlan("documents__fs", "/a.txt").finalize).toBe("read_text");
     expect(readBytesPlan("documents__fs", "/a.txt").finalize).toBe("read_bytes");
