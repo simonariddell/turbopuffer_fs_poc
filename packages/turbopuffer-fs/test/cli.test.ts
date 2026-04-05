@@ -252,4 +252,30 @@ describe("cli", () => {
       path: "/project/readme.md",
     });
   });
+
+  it("supports search as an alias for grep", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
+    const searchSpy = vi.spyOn(live, "search").mockResolvedValue([
+      { kind: "search_hit", mode: "bm25", path: "/project/readme.md", score: 9.9, snippet: "oauth token" },
+    ] as never);
+
+    const { io } = createIo();
+    expect(
+      await runCli(["search", "documents", ".", "oauth token", "--mode", "bm25"], io),
+    ).toBe(0);
+    expect(searchSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      "/project",
+      "oauth token",
+      expect.objectContaining({ mode: "bm25" }),
+    );
+  });
 });

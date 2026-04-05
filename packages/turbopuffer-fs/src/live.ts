@@ -119,6 +119,16 @@ export function grep(
   );
 }
 
+export function search(
+  client: Turbopuffer,
+  mount: string,
+  root: string,
+  pattern: string,
+  options: GrepOptions = {},
+) {
+  return grep(client, mount, root, pattern, options);
+}
+
 export function readText(client: Turbopuffer, mount: string, path: string) {
   return runPlan(client, readTextPlan(mountNamespace(mount), path));
 }

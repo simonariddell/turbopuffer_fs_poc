@@ -24,6 +24,7 @@ import {
   readBytes,
   readText,
   rm,
+  search,
   stat,
 } from "./live.js";
 import {
@@ -303,14 +304,16 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
         }
         break;
       }
-      case "grep": {
+      case "grep":
+      case "search": {
         const [mount, root, rawPattern] = parsed.positionals;
-        if (!mount || !root) throw new Error("grep requires <mount> <root> <pattern-or-query>");
+        if (!mount || !root) throw new Error(`${parsed.command} requires <mount> <root> <pattern-or-query>`);
         const cwd = await workspacePwd(client, mount, workspaceConfig);
         const mode = typeof parsed.flags.mode === "string" ? parsed.flags.mode : "literal";
         const pattern = rawPattern ?? (typeof parsed.flags.query === "string" ? parsed.flags.query : undefined);
-        if (!pattern) throw new Error("grep requires a pattern or query");
-        result = await grep(client, mount, resolveCliPath(root, { cwd }), pattern, {
+        if (!pattern) throw new Error(`${parsed.command} requires a pattern or query`);
+        const runner = parsed.command === "search" ? search : grep;
+        result = await runner(client, mount, resolveCliPath(root, { cwd }), pattern, {
           mode: mode as "literal" | "regex" | "bm25",
           glob: typeof parsed.flags.glob === "string" ? parsed.flags.glob : undefined,
           ignoreCase: Boolean(parsed.flags["ignore-case"]),
