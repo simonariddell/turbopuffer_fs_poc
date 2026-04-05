@@ -3,6 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TpufFsAdapter } from "../src/adapter.js";
 
 const fsApi = vi.hoisted(() => ({
+  ancestorPaths: vi.fn((value: string, includeSelf?: boolean | { includeSelf?: boolean }) => {
+    const include =
+      typeof includeSelf === "boolean" ? includeSelf : Boolean(includeSelf?.includeSelf);
+    const parts = value.split("/").filter(Boolean);
+    const limit = include ? parts.length : Math.max(parts.length - 1, 0);
+    const paths = ["/"];
+    for (let index = 1; index <= limit; index += 1) {
+      paths.push(`/${parts.slice(0, index).join("/")}`);
+    }
+    return value === "/" ? ["/"] : paths;
+  }),
   stat: vi.fn(),
   ls: vi.fn(),
   readText: vi.fn(),
@@ -95,14 +106,30 @@ describe("TpufFsAdapter", () => {
     await expect(adapter.symlink("a", "b")).rejects.toThrow("non-POSIX-complete filesystem-shaped runtime");
   });
 
-  it("returns empty path inventory conservatively", () => {
+  it("returns durable path inventory including root", () => {
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+      initialPaths: ["/project", "/project/a.txt"],
+    });
+
+    expect(adapter.getAllPaths()).toEqual(["/", "/project", "/project/a.txt"]);
+  });
+
+  it("updates path inventory after writes and deletes", async () => {
+    fsApi.stat.mockResolvedValue(null);
     const adapter = new TpufFsAdapter({
       client: {} as never,
       mount: "documents",
       cwdProvider: async () => "/project",
     });
 
-    expect(adapter.getAllPaths()).toEqual([]);
+    await adapter.writeFile("nested/file.txt", "hello");
+    expect(adapter.getAllPaths()).toEqual(["/", "/project", "/project/nested", "/project/nested/file.txt"]);
+
+    await adapter.rm("nested/file.txt");
+    expect(adapter.getAllPaths()).toEqual(["/", "/project", "/project/nested"]);
   });
 
   it("reports append-to-directory as invalid tpfs operation", async () => {

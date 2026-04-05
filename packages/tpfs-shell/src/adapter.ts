@@ -10,6 +10,7 @@ import type {
 } from "just-bash";
 import type { Turbopuffer } from "@turbopuffer/turbopuffer";
 import {
+  ancestorPaths,
   ls,
   mkdir,
   putBytes,
@@ -68,21 +69,45 @@ export interface TpufFsAdapterOptions {
   client: Turbopuffer;
   mount: string;
   cwdProvider: () => Promise<string>;
+  initialPaths?: string[];
 }
 
 export class TpufFsAdapter implements IFileSystem {
   private readonly client: Turbopuffer;
   private readonly mount: string;
   private readonly cwdProvider: () => Promise<string>;
+  private readonly pathInventory: Set<string>;
 
   constructor(options: TpufFsAdapterOptions) {
     this.client = options.client;
     this.mount = options.mount;
     this.cwdProvider = options.cwdProvider;
+    this.pathInventory = new Set(["/", ...(options.initialPaths ?? [])]);
   }
 
   private async resolveVirtualPath(target: string): Promise<string> {
     return resolveUserPath(target, { cwd: await this.cwdProvider() });
+  }
+
+  private rememberPath(path: string): void {
+    for (const ancestor of ancestorPaths(path, true)) {
+      this.pathInventory.add(ancestor);
+    }
+  }
+
+  private forgetPath(path: string, recursive = false): void {
+    if (recursive) {
+      const prefix = path === "/" ? "/" : `${path.replace(/\/$/, "")}/`;
+      for (const value of [...this.pathInventory]) {
+        if (value === path || value.startsWith(prefix)) {
+          this.pathInventory.delete(value);
+        }
+      }
+      this.pathInventory.add("/");
+      return;
+    }
+    this.pathInventory.delete(path);
+    this.pathInventory.add("/");
   }
 
   async readFile(path: string, options?: ReadFileOptions | BufferEncoding): Promise<string> {
@@ -108,13 +133,16 @@ export class TpufFsAdapter implements IFileSystem {
     const encoding = typeof options === "string" ? options : options?.encoding ?? "utf8";
     if (content instanceof Uint8Array) {
       await putBytes(this.client, this.mount, resolved, content);
+      this.rememberPath(resolved);
       return;
     }
     if (encoding === "base64" || encoding === "binary" || encoding === "hex") {
       await putBytes(this.client, this.mount, resolved, encodeContent(content, encoding));
+      this.rememberPath(resolved);
       return;
     }
     await putText(this.client, this.mount, resolved, content);
+    this.rememberPath(resolved);
   }
 
   async appendFile(
@@ -148,9 +176,11 @@ export class TpufFsAdapter implements IFileSystem {
     combined.set(extra, current.length);
     if (Number(existing.is_text ?? 0) === 1 && !(content instanceof Uint8Array)) {
       await putText(this.client, this.mount, resolved, decodeContent(combined));
+      this.rememberPath(resolved);
       return;
     }
     await putBytes(this.client, this.mount, resolved, combined);
+    this.rememberPath(resolved);
   }
 
   async exists(path: string): Promise<boolean> {
@@ -170,6 +200,7 @@ export class TpufFsAdapter implements IFileSystem {
   async mkdir(path: string, _options?: MkdirOptions): Promise<void> {
     const resolved = await this.resolveVirtualPath(path);
     await mkdir(this.client, this.mount, resolved);
+    this.rememberPath(resolved);
   }
 
   async readdir(path: string): Promise<string[]> {
@@ -194,6 +225,7 @@ export class TpufFsAdapter implements IFileSystem {
   async rm(path: string, options?: RmOptions): Promise<void> {
     const resolved = await this.resolveVirtualPath(path);
     await rm(this.client, this.mount, resolved, options?.recursive ?? false);
+    this.forgetPath(resolved, options?.recursive ?? false);
   }
 
   async cp(_src: string, _dest: string, _options?: CpOptions): Promise<void> {
@@ -226,7 +258,7 @@ export class TpufFsAdapter implements IFileSystem {
   }
 
   getAllPaths(): string[] {
-    return [];
+    return [...this.pathInventory].sort();
   }
 
   async chmod(_path: string, _mode: number): Promise<void> {

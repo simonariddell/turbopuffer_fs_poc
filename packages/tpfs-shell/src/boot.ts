@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import type Turbopuffer from "@turbopuffer/turbopuffer";
 import {
+  find,
   loadSessionState,
   makeClient,
   resolveWorkspaceConfig,
@@ -60,10 +61,18 @@ export async function createBootContext(options: ShellBootOptions): Promise<Shel
   } else {
     session = await loadSessionState(client, options.mount, { workspaceConfig });
   }
+  let initialPaths: string[] = [];
+  try {
+    initialPaths = ((await find(client, options.mount, "/")) as Array<Record<string, unknown>>)
+      .map((row) => String(row.path));
+  } catch {
+    initialPaths = ["/"];
+  }
   const fs = new TpufFsAdapter({
     client,
     mount: options.mount,
     cwdProvider: async () => String(session.cwd),
+    initialPaths,
   });
 
   const reloadSession = async (): Promise<Record<string, unknown>> => {
