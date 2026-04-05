@@ -1,26 +1,41 @@
 # turbopuffer-fs
 
-`turbopuffer-fs` is a small Python library that exposes a filesystem-shaped
-interface over turbopuffer without pretending turbopuffer is a local POSIX
-filesystem.
+`turbopuffer-fs` is now a **TypeScript-first** filesystem-shaped compiler/runtime
+over turbopuffer, plus a durable `just-bash` shell integration for
+agent-oriented workflows.
 
 The design is intentionally literal:
 
 1. compile filesystem intent into explicit turbopuffer plans,
 2. execute those plans with the real turbopuffer client,
-3. apply small pure post-processing steps locally.
+3. apply small pure finalizers locally,
+4. persist all critical shell/session state back through turbopuffer.
 
-The result is closer to an object-store filesystem view than a kernel
-filesystem:
+The result is closer to an object-store-backed durable workspace than a local
+POSIX filesystem:
 
 - backend-first
 - filesystem illusion second
 - no sidecar metadata database
-- no chunking
-- no daemon
+- no local durability daemon
+- no hidden manifest store
 - no FUSE
 
-## Model
+## Architecture
+
+The repository is a pnpm workspace with two TypeScript packages:
+
+- `packages/turbopuffer-fs`
+  - core filesystem compiler/runtime
+  - plan builders, runtime execution, finalizers, schema, workspace/session helpers,
+    bundle support, ingest, dogfood harness, and CLI
+- `packages/tpfs-shell`
+  - durable `just-bash` shell runtime layered on the core package
+  - restartable cwd/session state
+  - durable command logging
+  - filesystem adapter for shell execution
+
+## Durability model
 
 One mount maps to one turbopuffer namespace:
 
@@ -35,231 +50,130 @@ Files are explicit documents.
 Text files store full text in `text`.
 Binary files store full bytes in `blob_b64`.
 
-## Architecture
+Critical invariant:
 
-The package is split into explicit layers:
+> No critical state may live ephemerally between the machine and turbopuffer.
 
-- `turbopuffer_fs.fs`
-  - pure filesystem intent -> plan dicts
-- `turbopuffer_fs.runtime`
-  - plan dicts -> turbopuffer API calls
-- `turbopuffer_fs.post`
-  - raw rows -> final filesystem-ish results
-- `turbopuffer_fs.live`
-  - tiny convenience wrappers
+That means:
 
-The plans are plain dicts so you can inspect exactly what queries and writes
-will happen.
+- workspace files live in turbopuffer-backed docs
+- session state lives in `/state/session.json`
+- command logs live in `/logs/run.jsonl`
+- bundle/task artifacts live in the same durable namespace
+
+If a machine dies, another machine should be able to recover from turbopuffer
+alone.
 
 ## Installation
 
 ```bash
-python3 -m pip install turbopuffer-fs
+pnpm install
 ```
 
-For development:
-
-```bash
-python3 -m pip install -e ".[dev]"
-```
-
-## Quick start
-
-```python
-from turbopuffer_fs import make_client, put_text, ls, read_text
-
-client = make_client()
-
-put_text(client, "documents", "/notes/hello.txt", "hello turbopuffer\n")
-print(ls(client, "documents", "/notes"))
-print(read_text(client, "documents", "/notes/hello.txt"))
-```
-
-## Public API
-
-### Pure plan functions
-
-```python
-from turbopuffer_fs import (
-    stat_plan,
-    ls_plan,
-    find_plan,
-    cat_plan,
-    head_plan,
-    tail_plan,
-    grep_plan,
-    read_text_plan,
-    read_bytes_plan,
-    mkdir_plan,
-    put_text_plan,
-    put_bytes_plan,
-    rm_plan,
-    upsert_rows_plan,
-)
-```
-
-### Live wrappers
-
-```python
-from turbopuffer_fs import (
-    make_client,
-    mount_namespace,
-    list_mounts,
-    stat,
-    ls,
-    find,
-    cat,
-    head,
-    tail,
-    grep,
-    read_text,
-    read_bytes,
-    mkdir,
-    put_text,
-    put_bytes,
-    rm,
-    ingest_directory,
-)
-```
-
-## Semantics
-
-- paths are normalized absolute POSIX-like paths
-- `stat(path)` returns the document row or `None`
-- `ls(path)` returns direct children and raises on missing paths or file targets
-- `find(root)` is recursive and ordered by path
-- `cat(path)` and `read_text(path)` only work for text files
-- `read_bytes(path)` works for both text and binary files
-- `grep(...)` is literal substring grep only
-- `mkdir(path)` creates explicit directory documents and ensures parents exist
-- `put_text(...)` / `put_bytes(...)` are whole-file overwrites
-- `rm(path, recursive=False)` deletes files or directories with explicit
-  recursive behavior
-
-## Examples
-
-### Inspect a plan
-
-```python
-from turbopuffer_fs import stat_plan
-
-plan = stat_plan("documents__fs", "/notes/taxes.csv")
-print(plan)
-```
-
-### List a directory
-
-```python
-from turbopuffer_fs import ls
-
-rows = ls(client, "documents", "/notes")
-for row in rows:
-    print(row["path"], row["kind"])
-```
-
-### Read text and bytes
-
-```python
-from turbopuffer_fs import read_text, read_bytes
-
-text = read_text(client, "documents", "/notes/taxes.csv")
-data = read_bytes(client, "documents", "/photos/kid.jpg")
-```
-
-### Literal grep
-
-```python
-from turbopuffer_fs import grep
-
-matches = grep(
-    client,
-    "documents",
-    "/notes",
-    "oauth",
-    ignore_case=True,
-    glob="*.md",
-)
-```
-
-### Put and remove files
-
-```python
-from turbopuffer_fs import put_text, rm
-
-put_text(client, "documents", "/notes/todo.txt", "finish taxes\n")
-rm(client, "documents", "/notes/todo.txt")
-```
-
-### Ingest a local tree
-
-```python
-from turbopuffer_fs import ingest_directory
-
-ingest_directory(client, "documents", "./local-docs", mount_root="/archive")
-```
-
-## CLI
-
-The package also ships with a tiny JSON-first CLI:
-
-```bash
-tpfs --region aws-us-west-2 mounts
-tpfs --region aws-us-west-2 ls documents /notes
-tpfs --region aws-us-west-2 put-text documents /notes/todo.txt --stdin
-tpfs --region aws-us-west-2 grep documents / oauth --ignore-case
-```
-
-Use `--api-key`, `--region`, or `--base-url` explicitly, or rely on the
-corresponding environment variables you export in your shell.
-
-## Dogfooding harness
-
-There is also a seeded live dogfood runner for exercising the wrapper the way an
-agent would:
-
-```bash
-python3 -m turbopuffer_fs.dogfood \
-  --api-key "$TURBOPUFFER_API_KEY" \
-  --region "$TURBOPUFFER_REGION" \
-  --seed 7 \
-  --steps 50 \
-  --check-every 5
-```
-
-This runner:
-- creates a fresh mount/namespace
-- performs randomized filesystem-shaped operations
-- maintains a local shadow model
-- checks invariants as it goes
-- can emit replayable failure artifacts with `--artifact-dir`
-
-## TypeScript runtime and durable shell
-
-The repository now also contains a TypeScript workspace under `packages/`:
-
-- `packages/turbopuffer-fs`
-  - the TypeScript rewrite of the core filesystem wrapper
-- `packages/tpfs-shell`
-  - a durable `just-bash`-based shell runtime layered over the TypeScript core
-
-Useful workspace commands:
+## Workspace commands
 
 ```bash
 pnpm typecheck
 pnpm test
+pnpm --filter @workspace/turbopuffer-fs typecheck
 pnpm --filter @workspace/turbopuffer-fs test
 pnpm --filter @workspace/tpfs-shell test
 ```
 
-The shell runtime is designed so that:
-- `just-bash` provides shell semantics
-- `turbopuffer-fs` provides the durable filesystem semantics
-- workspace state such as `cwd` is persisted in `/state/session.json`
-- command logs are persisted in `/logs/run.jsonl`
+## Core TypeScript API
 
-This means an agent can restart on another machine and recover its workspace
-state from turbopuffer-backed storage instead of relying on local process or
-disk state.
+The core package exports:
+
+- path helpers
+- schema/row builders
+- pure plan builders
+- runtime execution
+- finalizers
+- live wrappers
+- workspace/session helpers
+- ingest helpers
+- bundle helpers
+- dogfood harness
+- CLI
+
+Representative API:
+
+```ts
+import {
+  makeClient,
+  statPlan,
+  lsPlan,
+  findPlan,
+  grepPlan,
+  stat,
+  ls,
+  find,
+  grep,
+  putText,
+  readText,
+  workspaceInit,
+  loadSessionState,
+} from "@workspace/turbopuffer-fs";
+```
+
+Example:
+
+```ts
+import { makeClient, putText, ls, readText } from "@workspace/turbopuffer-fs";
+
+const client = makeClient({
+  apiKey: process.env.TURBOPUFFER_API_KEY,
+  region: process.env.TURBOPUFFER_REGION,
+  baseURL: process.env.TURBOPUFFER_BASE_URL,
+});
+
+await putText(client, "documents", "/notes/hello.txt", "hello turbopuffer\n");
+console.log(await ls(client, "documents", "/notes"));
+console.log(await readText(client, "documents", "/notes/hello.txt"));
+```
+
+## CLI
+
+The TypeScript core ships the canonical `tpfs` CLI:
+
+```bash
+pnpm --filter @workspace/turbopuffer-fs build
+pnpm exec tpfs --region aws-us-west-2 mounts
+pnpm exec tpfs --region aws-us-west-2 ls documents /notes
+pnpm exec tpfs --region aws-us-west-2 put-text documents /notes/todo.txt --stdin
+pnpm exec tpfs --region aws-us-west-2 grep documents / oauth --ignore-case
+```
+
+Use `--api-key`, `--region`, or `--base-url` explicitly, or rely on the
+corresponding environment variables in your shell.
+
+## Durable shell runtime
+
+`packages/tpfs-shell` layers `just-bash` over the durable filesystem runtime.
+
+The shell runtime is designed so that:
+
+- `just-bash` provides shell semantics
+- `turbopuffer-fs` provides durable filesystem semantics
+- `cwd` is persisted in `/state/session.json`
+- command logs are appended to `/logs/run.jsonl`
+- restarts hydrate from turbopuffer-backed state instead of local disk state
+
+Supported phase-1 shell semantics include:
+
+- `pwd`
+- `cd`
+- `ls`
+- `cat`
+- durable file reads and writes
+- durable directory creation and removal
+
+Unsupported features fail explicitly instead of pretending to exist:
+
+- symlinks
+- hard links
+- chmod
+- full POSIX transactional semantics
 
 ## Deployment-configurable workspaces
 
@@ -279,40 +193,69 @@ hard-coded layout. The default workspace profile is:
 }
 ```
 
-These paths are just conventions stored inside the same filesystem-backed
-namespace. Durable session state such as `pwd` / `cd` lives in the configured
-`session_state` JSON file, which means an agent can restart on another node and
-recover its workspace location without any sidecar metadata service.
+These paths are conventions stored inside the same filesystem-backed namespace.
+Durable session state such as `pwd` / `cd` lives in the configured session-state
+document, so an agent can restart on another node and continue from durable
+state.
 
-The CLI supports this with:
+CLI examples:
 
 ```bash
-tpfs workspace-init documents
-tpfs workspace-show documents
-tpfs cd documents /project
-tpfs pwd documents
-tpfs ls documents               # defaults to current cwd
-tpfs cat documents src/file.py  # relative to current cwd
+pnpm exec tpfs workspace-init documents
+pnpm exec tpfs workspace-show documents
+pnpm exec tpfs cd documents /project
+pnpm exec tpfs pwd documents
+pnpm exec tpfs ls documents
+pnpm exec tpfs cat documents src/file.ts
 ```
 
-Task bundles can override parts of the workspace profile with a `workspace`
+Task bundles can override parts of the workspace profile via a `workspace`
 section in `bundle.json`.
+
+## Dogfood harness
+
+There is also a seeded live dogfood runner for exercising the wrapper the way an
+agent would:
+
+```bash
+pnpm --filter @workspace/turbopuffer-fs test -- --runInBand
+```
+
+Live dogfood validation is enabled when:
+
+- `TURBOPUFFER_FS_LIVE=1`
+- `TURBOPUFFER_API_KEY` is set
+- `TURBOPUFFER_REGION` is set
+
+The dogfood path:
+
+- creates a fresh mount/namespace
+- performs randomized filesystem-shaped operations
+- maintains a local shadow model
+- checks invariants as it goes
+- cleans up unless configured otherwise
+
+## Examples
+
+The `examples/task-bundles/` tree contains workload fixtures and task bundles
+used for bundle seeding, dogfooding, and shell-oriented recovery workflows.
+These example files may include Python project content as task fixture material,
+but they are not the library implementation surface.
 
 ## Non-goals
 
-This library intentionally does not implement:
+This project intentionally does not implement:
 
 - FUSE
 - kernel callbacks
 - POSIX-complete semantics
-- append or random writes
+- random writes
 - permissions
 - hard links
-- caching
-- chunking
 - background sync
+- hidden local truth
 - regex grep
 - external metadata stores
 
-The goal is a readable filesystem-shaped query compiler/runtime over
-turbopuffer, not a framework.
+The goal is a small, auditable, durable filesystem-shaped runtime over
+turbopuffer, not a heavyweight VFS framework.

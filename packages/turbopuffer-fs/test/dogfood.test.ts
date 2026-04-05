@@ -41,4 +41,12 @@ describe("dogfood model", () => {
       { path: "/notes/a.txt", line_number: 3, line: "OAuth done" },
     ]);
   });
+
+  it("rejects non-recursive non-empty directory delete", () => {
+    const state = newModelState();
+    applyModelOperation(state, { op: "put_text", path: "/notes/a.txt", text: "hello\n" });
+    expect(() => applyModelOperation(state, { op: "rm", path: "/notes", recursive: false })).toThrowError(
+      "DirectoryNotEmptyError:/notes",
+    );
+  });
 });

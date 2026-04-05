@@ -1,4 +1,0 @@
-# file: /workspace/src/turbopuffer_fs/fs.py
-# hypothesis_version: 6.151.10
-
-[256, '/', 'Eq', 'asc', 'assert', 'candidates', 'cat', 'check', 'child_probe', 'children', 'context', 'delete_batch_size', 'delete_rows_from', 'delete_targets', 'existing', 'file', 'filters', 'finalize', 'find', 'grep', 'head', 'id', 'include_attributes', 'is_text', 'kind', 'limit', 'ls', 'matches', 'mkdir_preconditions', 'name', 'namespace', 'order_field', 'page_size', 'paginate', 'path', 'payload', 'put_preconditions', 'query', 'rank_by', 'read_bytes', 'read_text', 'return_affected_ids', 'rm', 'rm_preconditions', 'stat', 'steps', 'tail', 'target', 'text', 'validate', 'write', 'write_summary', 'write_target_meta']

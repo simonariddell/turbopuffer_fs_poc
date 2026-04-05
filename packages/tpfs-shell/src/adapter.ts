@@ -19,7 +19,7 @@ import {
   resolveUserPath,
   rm,
   stat,
-} from "../../turbopuffer-fs/src/index.js";
+} from "@workspace/turbopuffer-fs";
 
 type ReadFileOptions = { encoding?: BufferEncoding | null };
 type WriteFileOptions = { encoding?: BufferEncoding };

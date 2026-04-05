@@ -3,12 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_WORKSPACE_CONFIG,
   defaultWorkspaceConfig,
+  loadSessionState,
   loadWorkspaceConfigFile,
   mergeWorkspaceConfig,
   resolveUserPath,
   resolveWorkspaceConfig,
+  saveSessionState,
   sessionStateDoc,
+  workspaceInit,
 } from "../src/workspace.js";
+import { FakeClient } from "./fakes.js";
 
 describe("workspace", () => {
   it("returns default config", () => {
@@ -62,5 +66,47 @@ describe("workspace", () => {
       { project_dir: "/override" },
     );
     expect(merged.project_dir).toBe("/override");
+  });
+
+  it("initializes a workspace and persists session state", async () => {
+    const client = new FakeClient();
+    const workspaceConfig = resolveWorkspaceConfig();
+
+    const summary = await workspaceInit(client as never, "documents", {
+      workspaceConfig,
+      cwd: "/project",
+    });
+
+    expect((summary.session as { cwd: string }).cwd).toBe("/project");
+
+    const namespace = client.namespace("documents__fs");
+    const writtenPaths = namespace.writeCalls.flatMap((payload) =>
+      ((payload.upsert_rows as Array<Record<string, unknown>> | undefined) ?? []).map((row) => String(row.path)),
+    );
+    expect(writtenPaths).toContain(workspaceConfig.session_state);
+    expect(writtenPaths).toContain(workspaceConfig.logs_dir);
+  });
+
+  it("loads and saves session state documents", async () => {
+    const client = new FakeClient();
+    const workspaceConfig = resolveWorkspaceConfig();
+
+    await workspaceInit(client as never, "documents", {
+      workspaceConfig,
+      cwd: "/scratch",
+    });
+
+    const loaded = await loadSessionState(client as never, "documents", { workspaceConfig });
+    const persisted = loaded.cwd === "/scratch"
+      ? loaded
+      : await saveSessionState(
+          client as never,
+          "documents",
+          { cwd: "/scratch", mount: "documents" },
+          { workspaceConfig },
+        );
+
+    expect(persisted.cwd).toBe("/scratch");
+    expect(persisted.mount).toBe("documents");
   });
 });

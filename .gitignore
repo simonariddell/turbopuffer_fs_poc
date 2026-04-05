@@ -1,10 +1,8 @@
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
 .hypothesis/
 node_modules/
 dist/
 .vite/
-
-*.egg-info/
+.env
+.env.*

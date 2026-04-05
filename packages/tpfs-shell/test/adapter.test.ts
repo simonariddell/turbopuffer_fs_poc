@@ -62,4 +62,44 @@ describe("TpufFsAdapter", () => {
       { name: "subdir", isFile: false, isDirectory: true, isSymbolicLink: false },
     ]);
   });
+
+  it("appends text to existing text files", async () => {
+    fsApi.stat.mockResolvedValue({ kind: "file", is_text: 1 });
+    fsApi.readBytes.mockResolvedValue(new Uint8Array(Buffer.from("hello ")));
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+    });
+
+    await adapter.appendFile("notes.txt", "world");
+
+    expect(fsApi.putText).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      "/project/notes.txt",
+      "hello world",
+    );
+  });
+
+  it("reports unsupported filesystem features explicitly", async () => {
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+    });
+
+    await expect(adapter.cp("a", "b")).rejects.toThrow("ENOTSUP");
+    await expect(adapter.symlink("a", "b")).rejects.toThrow("ENOTSUP");
+  });
+
+  it("returns empty path inventory conservatively", () => {
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+    });
+
+    expect(adapter.getAllPaths()).toEqual([]);
+  });
 });

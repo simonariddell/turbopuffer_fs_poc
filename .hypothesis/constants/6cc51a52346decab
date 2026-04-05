@@ -1,4 +1,0 @@
-# file: /workspace/src/turbopuffer_fs/paths.py
-# hypothesis_version: 6.151.10
-
-['\x00', '.', '..', '/', 'And', 'Eq', 'Glob', 'Gt', 'IGlob', 'Or', 'basename', 'glob pattern', 'parent', 'path', 'path:', 'tail', 'text', 'utf-8']

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  andFilter,
   ancestorPaths,
   basename,
   extension,
@@ -11,6 +12,7 @@ import {
   pathId,
   scopedGlobFilter,
   subtreeFilter,
+  withAfterFilter,
 } from "../src/paths.js";
 
 describe("paths", () => {
@@ -39,9 +41,21 @@ describe("paths", () => {
     expect(subtreeFilter("/")).toBeNull();
     expect(subtreeFilter("/a")).toEqual(["Or", [["path", "Eq", "/a"], ["path", "Glob", "/a/**"]]]);
     expect(scopedGlobFilter("/a", "*.txt")).toEqual(["basename", "Glob", "*.txt"]);
+    expect(scopedGlobFilter("/a", "nested/*.txt", { ignoreCase: true })).toEqual(["path", "IGlob", "/a/nested/*.txt"]);
   });
 
   it("keeps path ids stable", () => {
     expect(pathId("/a/b")).toBe(pathId("/a//b/"));
+  });
+
+  it("combines filters and paginated after filters", () => {
+    expect(andFilter(["kind", "Eq", "file"], ["is_text", "Eq", 1])).toEqual([
+      "And",
+      [["kind", "Eq", "file"], ["is_text", "Eq", 1]],
+    ]);
+    expect(withAfterFilter(["kind", "Eq", "file"], "path", "/b")).toEqual([
+      "And",
+      [["kind", "Eq", "file"], ["path", "Gt", "/b"]],
+    ]);
   });
 });

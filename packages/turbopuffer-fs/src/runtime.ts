@@ -155,7 +155,7 @@ async function deleteBatches(
   };
 }
 
-async function paginateOrderedQuery(
+export async function paginateOrderedQuery(
   namespaceHandle: ReturnType<Turbopuffer["namespace"]>,
   step: QueryStep,
 ): Promise<QueryResult> {

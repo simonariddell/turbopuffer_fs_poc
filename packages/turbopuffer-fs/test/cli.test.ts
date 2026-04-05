@@ -1,3 +1,7 @@
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as bundles from "../src/bundles.js";
@@ -42,7 +46,12 @@ describe("cli", () => {
       project_dir: "/project",
       input_dir: "/input",
     });
-    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({ cwd: "/project", mount: "documents" });
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
     vi.spyOn(live, "ls").mockResolvedValue([{ path: "/project/file.txt", kind: "file" }] as never);
 
     const { io, stdout, stderr } = createIo();
@@ -76,8 +85,18 @@ describe("cli", () => {
   it("supports pwd and cd through durable session helpers", async () => {
     vi.spyOn(live, "makeClient").mockReturnValue({} as never);
     vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
-    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({ cwd: "/project", mount: "documents" });
-    vi.spyOn(workspace, "saveSessionState").mockResolvedValue({ cwd: "/output", mount: "documents" });
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
+    vi.spyOn(workspace, "saveSessionState").mockResolvedValue({
+      cwd: "/output",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:01.000Z",
+      path: "/state/session.json",
+    });
 
     const pwdIo = createIo();
     expect(await runCli(["pwd", "documents"], pwdIo.io)).toBe(0);
@@ -91,7 +110,12 @@ describe("cli", () => {
   it("supports put-text from stdin and put-bytes from stdin", async () => {
     vi.spyOn(live, "makeClient").mockReturnValue({} as never);
     vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
-    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({ cwd: "/project", mount: "documents" });
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
     const putTextSpy = vi.spyOn(live, "putText").mockResolvedValue({ ok: true } as never);
     const putBytesSpy = vi.spyOn(live, "putBytes").mockResolvedValue({ ok: true } as never);
 
@@ -112,5 +136,77 @@ describe("cli", () => {
     const { io, stdout } = createIo();
     expect(await runCli(["dogfood", "--steps", "3"], io)).toBe(0);
     expect(JSON.parse(stdout.join(""))).toEqual({ stepsCompleted: 3, checksRun: 1 });
+  });
+
+  it("writes bytes metadata to an output file", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
+    vi.spyOn(live, "readBytes").mockResolvedValue(Uint8Array.from([1, 2, 3]) as never);
+
+    const { io, stdout } = createIo();
+    const code = await runCli(["read-bytes", "documents", "data.bin"], io);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout.join(""))).toEqual({
+      path: "/project/data.bin",
+      sizeBytes: 3,
+      blobB64: "AQID",
+    });
+  });
+
+  it("writes read-bytes output to a file when requested", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
+    vi.spyOn(live, "readBytes").mockResolvedValue(Uint8Array.from([1, 2, 3, 4]) as never);
+
+    const tempRoot = await mkdtemp(join(tmpdir(), "tpfs-cli-"));
+    const outPath = join(tempRoot, "bytes.bin");
+    const { io, stdout } = createIo();
+
+    expect(await runCli(["read-bytes", "documents", "blob.bin", "--out", outPath], io)).toBe(0);
+    expect(new Uint8Array(await readFile(outPath))).toEqual(Uint8Array.from([1, 2, 3, 4]));
+    expect(JSON.parse(stdout.join(""))).toEqual({
+      path: "/project/blob.bin",
+      out: outPath,
+      bytesWritten: 4,
+    });
+  });
+
+  it("supports put-text from a file", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
+    const putTextSpy = vi.spyOn(live, "putText").mockResolvedValue({ ok: true } as never);
+
+    const tempRoot = await mkdtemp(join(tmpdir(), "tpfs-cli-"));
+    const sourcePath = join(tempRoot, "input.txt");
+    await writeFile(sourcePath, "from file\n", "utf8");
+    const { io } = createIo();
+
+    expect(await runCli(["put-text", "documents", "notes.txt", "--file", sourcePath], io)).toBe(0);
+    expect(putTextSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      "/project/notes.txt",
+      "from file\n",
+      { mime: undefined },
+    );
   });
 });
