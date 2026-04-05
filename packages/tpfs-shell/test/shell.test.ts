@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import * as tpfs from "@workspace/turbopuffer-fs";
 import * as boot from "../src/boot.js";
+import { TpfsSpecError } from "../src/errors.js";
 import { runShellCommand } from "../src/shell.js";
 
 vi.mock("@workspace/turbopuffer-fs", async () => {
@@ -83,5 +84,12 @@ describe("tpfs shell", () => {
         bundleId: "bundle-1",
       }),
     );
+  });
+
+  it("surfaces tpfs spec-aware unsupported operation errors", async () => {
+    const context = await boot.createBootContext({ mount: "documents" });
+    await expect(context.fs.symlink("a", "b")).rejects.toBeInstanceOf(TpfsSpecError);
+    await expect(context.fs.symlink("a", "b")).rejects.toThrow("TPFS_UNSUPPORTED_BY_DESIGN");
+    await expect(context.fs.symlink("a", "b")).rejects.toThrow("SPEC.tpfs.md");
   });
 });

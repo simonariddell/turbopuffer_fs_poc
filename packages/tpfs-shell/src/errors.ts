@@ -109,3 +109,59 @@ export function invalidTpfsOperation(
     specSections: options.specSections ?? ["§8", "§13", "§14"],
   });
 }
+
+export function fileNotFound(path: string, operation: string): TpfsSpecError {
+  return invalidTpfsOperation(
+    operation,
+    `The required path does not exist in the durable tpfs namespace: ${path}.`,
+    {
+      alternatives: [
+        "Create the path durably before retrying",
+        "Use exists/stat first when the path may be absent",
+      ],
+      specSections: ["§8", "§11", "§14"],
+    },
+  );
+}
+
+export function notADirectory(path: string, operation: string): TpfsSpecError {
+  return invalidTpfsOperation(
+    operation,
+    `The path is not a directory in the durable tpfs model: ${path}.`,
+    {
+      alternatives: [
+        "Target a directory path",
+        "Use stat to inspect kind before calling directory-only operations",
+      ],
+      specSections: ["§8", "§13", "§14"],
+    },
+  );
+}
+
+export function isADirectory(path: string, operation: string): TpfsSpecError {
+  return invalidTpfsOperation(
+    operation,
+    `The path is a directory where a file operation was requested: ${path}.`,
+    {
+      alternatives: [
+        "Use a file target instead",
+        "Use directory-aware operations for directory nodes",
+      ],
+      specSections: ["§8", "§13", "§14"],
+    },
+  );
+}
+
+export function directoryNotEmpty(path: string, operation: string): TpfsSpecError {
+  return invalidTpfsOperation(
+    operation,
+    `The directory contains durable child entries and the requested operation requires an empty directory: ${path}.`,
+    {
+      alternatives: [
+        "Retry with recursive semantics when appropriate",
+        "Remove or move child entries first",
+      ],
+      specSections: ["§7.4", "§8.12", "§14"],
+    },
+  );
+}

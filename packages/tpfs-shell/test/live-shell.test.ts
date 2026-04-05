@@ -16,6 +16,7 @@ describeLive("tpfs-shell live", () => {
   const mounts = [
     `shelllive${Math.random().toString(16).slice(2, 10)}`,
     `shelllive${Math.random().toString(16).slice(2, 10)}`,
+    `shelllive${Math.random().toString(16).slice(2, 10)}`,
   ];
   const namespaces = mounts.map((mount) => mountNamespace(mount));
 
@@ -89,4 +90,25 @@ describeLive("tpfs-shell live", () => {
     expect(persisted.cwd).toBe("/project/bundle-dir");
     expect(persisted.bundle_id).toBe("bundle-123");
   }, 20000);
+
+  it("supports durable cp and mv through the shell adapter", async () => {
+    const mount = mounts[2]!;
+    const context = await createBootContext({
+      mount,
+      apiKey: process.env.TURBOPUFFER_API_KEY,
+      region: process.env.TURBOPUFFER_REGION,
+      baseURL: process.env.TURBOPUFFER_BASE_URL,
+    });
+
+    await runShellCommand(context, "mkdir docs");
+    await runShellCommand(context, "echo hello > docs/source.txt");
+    await runShellCommand(context, "cp docs/source.txt docs/copied.txt");
+    await runShellCommand(context, "mv docs/copied.txt docs/moved.txt");
+
+    const copied = await readText(context.client, mount, "/project/docs/moved.txt");
+    expect(String(copied).trim()).toBe("hello");
+
+    const source = await readText(context.client, mount, "/project/docs/source.txt");
+    expect(String(source).trim()).toBe("hello");
+  }, 30000);
 });

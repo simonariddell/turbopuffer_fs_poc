@@ -560,11 +560,68 @@ Current semantics:
 
 ### 8.18 `getAllPaths()`
 
+Purpose:
+
+- return a sorted durable path inventory for shell/path-enumeration consumers
+
 Current semantics:
 
-- not populated
-- consumers MUST NOT assume a complete enumeration is currently available from
-  this method
+- inventory is seeded from a durable recursive enumeration at adapter boot
+- inventory is updated for mutations performed through the active adapter
+- inventory includes `/`
+
+Constraints:
+
+- consumers MUST NOT assume this inventory reflects concurrent out-of-band
+  mutations performed through a different adapter instance until the adapter is
+  re-booted or refreshed
+
+### 8.19 `cp(src, dest, options)`
+
+Purpose:
+
+- durably copy a file or directory subtree
+
+Semantics:
+
+- file copy MUST read the durable source and durably write the destination
+- directory copy MUST require `recursive = true`
+- directory copy MUST materialize destination directories explicitly
+- copying a directory into itself or its descendant MUST fail
+- destination-path resolution MAY treat an existing directory destination as a
+  parent container and append the source basename
+
+Durability:
+
+- success MUST imply the destination copy is durably written
+
+Atomicity:
+
+- recursive copy MUST NOT be assumed atomic across the full subtree
+
+### 8.20 `mv(src, dest)`
+
+Purpose:
+
+- durably move a file or directory subtree
+
+Current semantics:
+
+- file move is implemented as durable copy then durable delete
+- directory move is implemented as durable subtree copy then recursive delete
+- moving `/` MUST fail
+- moving a directory into itself or its descendant MUST fail
+
+Durability:
+
+- success MUST imply the destination exists durably and the source delete has
+  completed durably for the completed operation
+
+Atomicity:
+
+- `mv` MUST NOT be assumed equivalent to POSIX atomic rename
+- partial-commit behavior is possible because move is implemented as multiple
+  durable operations
 
 ---
 
@@ -681,8 +738,6 @@ to observe that mutation by reading turbopuffer-backed state alone.
 
 The following operations are currently unsupported in the adapter:
 
-- `cp`
-- `mv`
 - `chmod`
 - `symlink`
 - `link`
@@ -700,7 +755,12 @@ The following operations are partial or constrained:
 - `lstat`
   - no distinction from `stat`
 - `getAllPaths`
-  - not populated
+  - inventory is adapter-scoped and not guaranteed to reflect concurrent
+    out-of-band mutations without refresh/reboot
+- `cp`
+  - recursive subtree copy is non-atomic
+- `mv`
+  - implemented as copy+delete rather than atomic rename
 
 ### 12.3 Required unsupported-operation behavior
 

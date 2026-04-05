@@ -46,6 +46,29 @@ function decodeContent(content: Uint8Array, encoding: BufferEncoding = "utf8"): 
   return Buffer.from(content).toString(encoding === "utf-8" ? "utf8" : encoding);
 }
 
+function isBinaryEncoding(encoding: BufferEncoding): boolean {
+  return ["base64", "hex"].includes(encoding);
+}
+
+function looksLikeTextString(content: string, encoding: BufferEncoding): boolean {
+  if (isBinaryEncoding(encoding)) {
+    return false;
+  }
+  for (let index = 0; index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code === 0) {
+      return false;
+    }
+    if (code === 9 || code === 10 || code === 13) {
+      continue;
+    }
+    if (code < 32) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function childName(path: string): string {
   if (path === "/") return "/";
   return path.split("/").filter(Boolean).at(-1) ?? path;
@@ -232,7 +255,7 @@ export class TpufFsAdapter implements IFileSystem {
       this.rememberPath(resolved);
       return;
     }
-    if (encoding === "base64" || encoding === "binary" || encoding === "hex") {
+    if (!looksLikeTextString(content, encoding)) {
       await putBytes(this.client, this.mount, resolved, encodeContent(content, encoding));
       this.rememberPath(resolved);
       return;
@@ -266,12 +289,23 @@ export class TpufFsAdapter implements IFileSystem {
       );
     }
     const current = await this.readFileBuffer(path);
-    const extra = encodeContent(content, typeof options === "string" ? options : options?.encoding ?? "utf8");
+    const encoding = typeof options === "string" ? options : options?.encoding ?? "utf8";
+    const binaryEncoding = isBinaryEncoding(encoding) || !(content instanceof Uint8Array) && !looksLikeTextString(content, encoding);
+    const shouldPromoteEmptyFileToText =
+      Number(existing.is_text ?? 0) !== 1 &&
+      Number(existing.size_bytes ?? 0) === 0 &&
+      !(content instanceof Uint8Array) &&
+      !binaryEncoding;
+    const extra = encodeContent(content, encoding);
     const combined = new Uint8Array(current.length + extra.length);
     combined.set(current, 0);
     combined.set(extra, current.length);
-    if (Number(existing.is_text ?? 0) === 1 && !(content instanceof Uint8Array)) {
-      await putText(this.client, this.mount, resolved, decodeContent(combined));
+    if (
+      (Number(existing.is_text ?? 0) === 1 || shouldPromoteEmptyFileToText) &&
+      !(content instanceof Uint8Array) &&
+      !binaryEncoding
+    ) {
+      await putText(this.client, this.mount, resolved, decodeContent(combined, encoding));
       this.rememberPath(resolved);
       return;
     }

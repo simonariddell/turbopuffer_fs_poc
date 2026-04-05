@@ -165,6 +165,8 @@ Supported phase-1 shell semantics include:
 - `cd`
 - `ls`
 - `cat`
+- `cp`
+- `mv`
 - durable file reads and writes
 - durable directory creation and removal
 
@@ -173,6 +175,7 @@ Unsupported features fail explicitly instead of pretending to exist:
 - symlinks
 - hard links
 - chmod
+- `utimes`
 - full POSIX transactional semantics
 
 ## Deployment-configurable workspaces
