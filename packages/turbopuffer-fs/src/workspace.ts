@@ -16,6 +16,14 @@ export const DEFAULT_WORKSPACE_CONFIG = {
 export type WorkspaceConfig = Record<keyof typeof DEFAULT_WORKSPACE_CONFIG, string> &
   Record<string, string>;
 
+export interface SessionState extends AnyObject {
+  cwd: string;
+  mount: string;
+  updated_at: string;
+  path: string;
+  bundle_id?: string | null;
+}
+
 export function defaultWorkspaceConfig(): WorkspaceConfig {
   return { ...DEFAULT_WORKSPACE_CONFIG };
 }
@@ -71,9 +79,9 @@ export function sessionStateDoc(options: {
   cwd: string;
   config?: WorkspaceConfig;
   bundleId?: string | null;
-}): AnyObject {
+}): SessionState {
   const workspace = options.config ?? defaultWorkspaceConfig();
-  const doc: AnyObject = {
+  const doc: SessionState = {
     cwd: normalizePath(options.cwd),
     mount: options.mount,
     updated_at: nowIsoUtc(),
@@ -89,7 +97,7 @@ export async function loadSessionState(
   client: Parameters<typeof stat>[0],
   mount: string,
   options: { workspaceConfig: WorkspaceConfig },
-): Promise<AnyObject> {
+): Promise<SessionState> {
   const path = options.workspaceConfig.session_state;
   const existing = await stat(client, mount, path);
   if (existing === null) {
@@ -100,7 +108,7 @@ export async function loadSessionState(
     });
   }
   const text = await readText(client, mount, path);
-  const payload = JSON.parse(String(text)) as AnyObject;
+  const payload = JSON.parse(String(text)) as SessionState;
   payload.path = path;
   return payload;
 }
@@ -110,20 +118,21 @@ export async function saveSessionState(
   mount: string,
   state: Record<string, unknown>,
   options: { workspaceConfig: WorkspaceConfig },
-): Promise<AnyObject> {
-  const payload: AnyObject = {
-    cwd: normalizePath(String(state.cwd)),
-    mount: String(state.mount ?? mount),
-    updated_at: nowIsoUtc(),
-  };
-  if (state.bundle_id !== undefined) {
-    payload.bundle_id = state.bundle_id;
+): Promise<SessionState> {
+  const payload = Object.fromEntries(
+    Object.entries(state).filter(([key, value]) => key !== "path" && value !== undefined),
+  ) as SessionState;
+  payload.cwd = normalizePath(String(state.cwd));
+  payload.mount = String(state.mount ?? mount);
+  payload.updated_at = nowIsoUtc();
+  if (payload.bundle_id === undefined) {
+    delete payload.bundle_id;
   }
   const path = options.workspaceConfig.session_state;
   await putText(client, mount, path, JSON.stringify(payload, null, 2), {
     mime: "application/json",
   });
-  return { ...payload, path };
+  return { ...payload, path } as SessionState;
 }
 
 export function resolveUserPath(userPath: string | null | undefined, options: { cwd: string }): string {

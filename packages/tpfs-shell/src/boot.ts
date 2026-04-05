@@ -1,13 +1,15 @@
-import type Turbopuffer from "@turbopuffer/turbopuffer";
+import { readFile } from "node:fs/promises";
 
+import type Turbopuffer from "@turbopuffer/turbopuffer";
 import {
   loadSessionState,
   makeClient,
   resolveWorkspaceConfig,
   saveSessionState,
+  stat,
   type WorkspaceConfig,
   workspaceInit,
-} from "../../turbopuffer-fs/src/index.js";
+} from "@workspace/turbopuffer-fs";
 
 import { TpufFsAdapter } from "./adapter.js";
 
@@ -27,6 +29,7 @@ export interface ShellBootContext {
   session: Record<string, unknown>;
   fs: TpufFsAdapter;
   persistSession: (cwd: string) => Promise<void>;
+  reloadSession: () => Promise<Record<string, unknown>>;
   logPath: string;
 }
 
@@ -36,20 +39,32 @@ export async function createBootContext(options: ShellBootOptions): Promise<Shel
     region: options.region,
     baseURL: options.baseURL,
   });
+  const deploymentConfig = options.workspaceConfigPath
+    ? (JSON.parse(await readFile(options.workspaceConfigPath, "utf8")) as Record<string, unknown>)
+    : undefined;
   const workspaceConfig = resolveWorkspaceConfig({
-    deploymentConfig: undefined,
+    deploymentConfig,
     bundleSpec: options.bundleSpec ?? undefined,
   });
-  let session = await loadSessionState(client, options.mount, { workspaceConfig });
-  if (!session.path) {
+  const sessionDoc = await stat(client, options.mount, workspaceConfig.session_state);
+  let session: Record<string, unknown>;
+  if (sessionDoc === null) {
     const initialized = await workspaceInit(client, options.mount, { workspaceConfig });
     session = initialized.session as Record<string, unknown>;
+  } else {
+    session = await loadSessionState(client, options.mount, { workspaceConfig });
   }
   const fs = new TpufFsAdapter({
     client,
     mount: options.mount,
-    cwdProvider: async () => String((await loadSessionState(client, options.mount, { workspaceConfig })).cwd),
+    cwdProvider: async () => String(session.cwd),
   });
+
+  const reloadSession = async (): Promise<Record<string, unknown>> => {
+    session = await loadSessionState(client, options.mount, { workspaceConfig });
+    return session;
+  };
+
   return {
     client,
     mount: options.mount,
@@ -60,11 +75,12 @@ export async function createBootContext(options: ShellBootOptions): Promise<Shel
       const saved = await saveSessionState(
         client,
         options.mount,
-        { cwd, mount: options.mount },
+        { ...session, cwd, mount: options.mount },
         { workspaceConfig },
       );
-      session = { ...session, cwd: saved.cwd };
+      session = { ...session, ...saved };
     },
+    reloadSession,
     logPath: `${workspaceConfig.logs_dir}/run.jsonl`,
   };
 }

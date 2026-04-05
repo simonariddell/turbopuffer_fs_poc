@@ -1,4 +1,4 @@
-import { readText, putText } from "../../turbopuffer-fs/src/index.js";
+import { readText, stat, putText } from "@workspace/turbopuffer-fs";
 import type Turbopuffer from "@turbopuffer/turbopuffer";
 
 export type CommandLogEntry = {
@@ -18,12 +18,17 @@ export async function appendCommandLog(
   entry: CommandLogEntry,
 ): Promise<void> {
   const line = `${JSON.stringify(entry)}\n`;
+  const existingRow = await stat(client, mount, logPath);
+  if (existingRow === null) {
+    await putText(client, mount, logPath, line, { mime: "application/jsonl" });
+    return;
+  }
   try {
     const existing = (await readText(client, mount, logPath)) as string;
     await putText(client, mount, logPath, `${existing}${line}`, {
       mime: "application/jsonl",
     });
-  } catch {
-    await putText(client, mount, logPath, line, { mime: "application/jsonl" });
+  } catch (error) {
+    throw new Error(`failed to append durable command log at ${logPath}: ${String((error as Error).message)}`);
   }
 }

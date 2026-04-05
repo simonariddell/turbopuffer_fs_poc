@@ -3,6 +3,11 @@ import { Bash, type ExecResult } from "just-bash";
 import { appendCommandLog } from "./logging.js";
 import { createBootContext, type ShellBootContext, type ShellBootOptions } from "./boot.js";
 
+function cwdFromExecResult(result: ExecResult, fallback: string): string {
+  const candidate = (result as ExecResult & { cwd?: string }).cwd;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : fallback;
+}
+
 export async function createBash(context: ShellBootContext): Promise<Bash> {
   return new Bash({
     fs: context.fs,
@@ -76,7 +81,7 @@ export async function runShellCommand(
 
   const bash = await createBash(context);
   const result = await bash.exec(command);
-  const cwdAfter = cwdBefore;
+  const cwdAfter = cwdFromExecResult(result, bash.getCwd());
 
   if (cwdAfter !== cwdBefore) {
     await context.persistSession(cwdAfter);

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 
-import { mountNamespace, readText } from "@workspace/turbopuffer-fs";
+import { loadSessionState, mountNamespace, readText } from "@workspace/turbopuffer-fs";
 
 import { createBootContext } from "../src/boot.js";
 import { runShellCommand } from "../src/shell.js";
@@ -61,5 +61,25 @@ describeLive("tpfs-shell live", () => {
     expect(logText).toContain('"command":"pwd"');
     expect(logText).toContain('"command":"cd notes"');
     expect(logText).toContain('"command":"mkdir notes"');
+  }, 20000);
+
+  it("preserves bundle session metadata when cwd changes", async () => {
+    const first = await createBootContext({
+      mount,
+      apiKey: process.env.TURBOPUFFER_API_KEY,
+      region: process.env.TURBOPUFFER_REGION,
+      baseURL: process.env.TURBOPUFFER_BASE_URL,
+      bundleSpec: { id: "bundle-123", workspace: { project_dir: "/project" } },
+    });
+
+    await runShellCommand(first, "mkdir bundle-dir");
+    await runShellCommand(first, "cd bundle-dir");
+
+    const persisted = await loadSessionState(first.client, mount, {
+      workspaceConfig: first.workspaceConfig,
+    });
+
+    expect(persisted.cwd).toBe("/project/bundle-dir");
+    expect(persisted.bundle_id).toBe("bundle-123");
   }, 20000);
 });
