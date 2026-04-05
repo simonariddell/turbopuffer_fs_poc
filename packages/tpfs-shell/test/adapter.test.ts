@@ -89,8 +89,10 @@ describe("TpufFsAdapter", () => {
       cwdProvider: async () => "/project",
     });
 
-    await expect(adapter.cp("a", "b")).rejects.toThrow("ENOTSUP");
-    await expect(adapter.symlink("a", "b")).rejects.toThrow("ENOTSUP");
+    await expect(adapter.cp("a", "b")).rejects.toThrow("TPFS_NOT_YET_IMPLEMENTED");
+    await expect(adapter.cp("a", "b")).rejects.toThrow("SPEC.tpfs.md");
+    await expect(adapter.symlink("a", "b")).rejects.toThrow("TPFS_UNSUPPORTED_BY_DESIGN");
+    await expect(adapter.symlink("a", "b")).rejects.toThrow("non-POSIX-complete filesystem-shaped runtime");
   });
 
   it("returns empty path inventory conservatively", () => {
@@ -101,5 +103,17 @@ describe("TpufFsAdapter", () => {
     });
 
     expect(adapter.getAllPaths()).toEqual([]);
+  });
+
+  it("reports append-to-directory as invalid tpfs operation", async () => {
+    fsApi.stat.mockResolvedValue({ kind: "dir", is_text: 0 });
+    const adapter = new TpufFsAdapter({
+      client: {} as never,
+      mount: "documents",
+      cwdProvider: async () => "/project",
+    });
+
+    await expect(adapter.appendFile("notes", "world")).rejects.toThrow("TPFS_INVALID_OPERATION");
+    await expect(adapter.appendFile("notes", "world")).rejects.toThrow("appendFile cannot target a directory");
   });
 });

@@ -21,6 +21,8 @@ import {
   stat,
 } from "@workspace/turbopuffer-fs";
 
+import { invalidTpfsOperation, notYetImplemented, unsupportedByDesign } from "./errors.js";
+
 type ReadFileOptions = { encoding?: BufferEncoding | null };
 type WriteFileOptions = { encoding?: BufferEncoding };
 type DirentEntry = {
@@ -127,7 +129,17 @@ export class TpufFsAdapter implements IFileSystem {
       return;
     }
     if (existing.kind === "dir") {
-      throw new Error(`EISDIR: illegal operation on a directory, append '${path}'`);
+      throw invalidTpfsOperation(
+        "appendFile",
+        `appendFile cannot target a directory path (${path}).`,
+        {
+          alternatives: [
+            "append to a file path instead",
+            "use mkdir for durable directory creation",
+          ],
+          specSections: ["§8.11", "§13"],
+        },
+      );
     }
     const current = await this.readFileBuffer(path);
     const extra = encodeContent(content, typeof options === "string" ? options : options?.encoding ?? "utf8");
@@ -185,11 +197,28 @@ export class TpufFsAdapter implements IFileSystem {
   }
 
   async cp(_src: string, _dest: string, _options?: CpOptions): Promise<void> {
-    throw new Error("ENOTSUP: cp is not yet supported");
+    throw notYetImplemented(
+      "cp",
+      "Durable copy semantics are not implemented yet for the tpfs adapter.",
+      {
+        alternatives: [
+          "copy file contents explicitly with readFile/readFileBuffer plus writeFile",
+          "copy directory trees through supported tpfs operations until native cp is implemented",
+        ],
+      },
+    );
   }
 
   async mv(_src: string, _dest: string): Promise<void> {
-    throw new Error("ENOTSUP: mv is not yet supported");
+    throw notYetImplemented(
+      "mv",
+      "Durable move semantics are not implemented yet for the tpfs adapter.",
+      {
+        alternatives: [
+          "copy durable content to the new path and delete the old path explicitly",
+        ],
+      },
+    );
   }
 
   resolvePath(base: string, target: string): string {
@@ -201,19 +230,31 @@ export class TpufFsAdapter implements IFileSystem {
   }
 
   async chmod(_path: string, _mode: number): Promise<void> {
-    throw new Error("ENOTSUP: chmod is not supported");
+    throw unsupportedByDesign(
+      "chmod",
+      "tpfs does not implement a durable permission model.",
+    );
   }
 
   async symlink(_target: string, _linkPath: string): Promise<void> {
-    throw new Error("ENOTSUP: symlink is not supported");
+    throw unsupportedByDesign(
+      "symlink",
+      "tpfs does not represent a durable symlink graph.",
+    );
   }
 
   async link(_existingPath: string, _newPath: string): Promise<void> {
-    throw new Error("ENOTSUP: hard links are not supported");
+    throw unsupportedByDesign(
+      "link",
+      "tpfs does not represent hard-link identity or shared inode semantics.",
+    );
   }
 
   async readlink(_path: string): Promise<string> {
-    throw new Error("ENOTSUP: readlink is not supported");
+    throw unsupportedByDesign(
+      "readlink",
+      "tpfs does not represent symlink targets because symlinks are unsupported.",
+    );
   }
 
   async lstat(path: string): Promise<FsStat> {
@@ -225,6 +266,9 @@ export class TpufFsAdapter implements IFileSystem {
   }
 
   async utimes(_path: string, _atime: Date, _mtime: Date): Promise<void> {
-    throw new Error("ENOTSUP: utimes is not supported");
+    throw unsupportedByDesign(
+      "utimes",
+      "tpfs does not expose a durable mutable timestamp API.",
+    );
   }
 }
