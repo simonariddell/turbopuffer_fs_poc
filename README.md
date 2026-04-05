@@ -142,10 +142,20 @@ pnpm exec tpfs --region aws-us-west-2 mounts
 pnpm exec tpfs --region aws-us-west-2 ls documents /notes
 pnpm exec tpfs --region aws-us-west-2 put-text documents /notes/todo.txt --stdin
 pnpm exec tpfs --region aws-us-west-2 grep documents / oauth --ignore-case
+pnpm exec tpfs --region aws-us-west-2 grep documents / "oauth.*token" --mode regex --ignore-case
+pnpm exec tpfs --region aws-us-west-2 search documents / "oauth token" --mode bm25
 ```
 
 Use `--api-key`, `--region`, or `--base-url` explicitly, or rely on the
 corresponding environment variables in your shell.
+
+`grep` is now mode-aware:
+
+- `--mode literal` for exact substring grep
+- `--mode regex` for exact regex line matching
+- `--mode bm25` for ranked lexical retrieval
+
+`search` is currently a first-class alias over the same grep/search engine.
 
 ## Durable shell runtime
 
@@ -257,7 +267,6 @@ This project intentionally does not implement:
 - hard links
 - background sync
 - hidden local truth
-- regex grep
 - external metadata stores
 
 The goal is a small, auditable, durable filesystem-shaped runtime over

@@ -397,18 +397,56 @@ Failure:
 
 Purpose:
 
-- return substring matches over candidate text files
+- return grep/search results over candidate text files
 
 Semantics:
 
-- grep is literal substring grep, not regex grep
-- matching MAY be case-sensitive or case-insensitive
-- matching MAY be pre-filtered by path/glob at query time
-- line matching MUST be finalized locally from candidate text rows
+- `grep` is the primary search entrypoint
+- implementations MAY also expose `search(...)` as a first-class alias over the
+  same engine
+- `grep` behavior is mode-dependent
+
+Required modes:
+
+- `mode = "literal"`
+  - exact literal substring grep
+  - returns exact line hits
+- `mode = "regex"`
+  - exact regex grep
+  - returns exact line hits
+- `mode = "bm25"`
+  - ranked lexical retrieval
+  - returns ranked search hits, not exact grep lines
+
+Search pipeline:
+
+- candidate-stage remote search MAY over-approximate
+- final-stage exact line matching MUST remain exact for exact modes
+- ranked modes MAY return ranked search hits instead of line hits
+
+Filtering MAY include:
+
+- glob
+- kind
+- ignore-case matching
+- limit
+- mode-specific search arguments
+
+Output contract:
+
+- exact modes return:
+  - `path`
+  - `line_number`
+  - `line`
+- ranked modes return:
+  - `path`
+  - `score`
+  - optional `snippet`
+  - optional mode-specific metadata
 
 Failure:
 
-- empty pattern SHOULD fail
+- empty pattern/query SHOULD fail
 - missing root SHOULD fail
 
 ### 8.8 `mkdir(path)`
