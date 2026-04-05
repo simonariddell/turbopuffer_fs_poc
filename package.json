@@ -5,7 +5,11 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "test:conformance": "pnpm --filter @workspace/turbopuffer-fs test:conformance && pnpm --filter @workspace/tpfs-shell test:conformance",
+    "test:restart": "pnpm --filter @workspace/tpfs-shell test:restart",
+    "test:agent": "pnpm --filter @workspace/tpfs-shell test:agent",
+    "test:search-evals": "pnpm --filter @workspace/turbopuffer-fs test:search-evals"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
