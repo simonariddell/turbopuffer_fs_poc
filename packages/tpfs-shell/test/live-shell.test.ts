@@ -13,8 +13,11 @@ const enabled =
 const describeLive = enabled ? describe : describe.skip;
 
 describeLive("tpfs-shell live", () => {
-  const mount = `shelllive${Math.random().toString(16).slice(2, 10)}`;
-  const namespace = mountNamespace(mount);
+  const mounts = [
+    `shelllive${Math.random().toString(16).slice(2, 10)}`,
+    `shelllive${Math.random().toString(16).slice(2, 10)}`,
+  ];
+  const namespaces = mounts.map((mount) => mountNamespace(mount));
 
   afterAll(async () => {
     if (!enabled) return;
@@ -24,14 +27,17 @@ describeLive("tpfs-shell live", () => {
       region: process.env.TURBOPUFFER_REGION,
       baseURL: process.env.TURBOPUFFER_BASE_URL,
     });
-    try {
-      await client.namespace(namespace).deleteAll();
-    } catch {
-      // ignore cleanup failure
+    for (const namespace of namespaces) {
+      try {
+        await client.namespace(namespace).deleteAll();
+      } catch {
+        // ignore cleanup failure
+      }
     }
   });
 
   it("persists cwd and logs across shell restarts", async () => {
+    const mount = mounts[0]!;
     const first = await createBootContext({
       mount,
       apiKey: process.env.TURBOPUFFER_API_KEY,
@@ -64,6 +70,7 @@ describeLive("tpfs-shell live", () => {
   }, 20000);
 
   it("preserves bundle session metadata when cwd changes", async () => {
+    const mount = mounts[1]!;
     const first = await createBootContext({
       mount,
       apiKey: process.env.TURBOPUFFER_API_KEY,

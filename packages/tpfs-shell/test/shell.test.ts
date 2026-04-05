@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import * as tpfs from "@workspace/turbopuffer-fs";
 import * as boot from "../src/boot.js";
 import { runShellCommand } from "../src/shell.js";
 
@@ -68,5 +69,19 @@ describe("tpfs shell", () => {
     await runShellCommand(context, "cd notes");
 
     expect(persistSession).toHaveBeenCalledWith("/project/notes");
+  });
+
+  it("passes bundle id into workspace initialization when bootstrapping a new mount", async () => {
+    vi.mocked(tpfs.stat).mockResolvedValueOnce(null);
+
+    await boot.createBootContext({ mount: "documents", bundleSpec: { id: "bundle-1" } });
+
+    expect(tpfs.workspaceInit).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      expect.objectContaining({
+        bundleId: "bundle-1",
+      }),
+    );
   });
 });

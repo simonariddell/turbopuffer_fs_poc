@@ -49,7 +49,13 @@ export async function createBootContext(options: ShellBootOptions): Promise<Shel
   const sessionDoc = await stat(client, options.mount, workspaceConfig.session_state);
   let session: Record<string, unknown>;
   if (sessionDoc === null) {
-    const initialized = await workspaceInit(client, options.mount, { workspaceConfig });
+    const initialized = await workspaceInit(client, options.mount, {
+      workspaceConfig,
+      bundleId:
+        typeof options.bundleSpec?.id === "string" && options.bundleSpec.id.length > 0
+          ? options.bundleSpec.id
+          : null,
+    });
     session = initialized.session as Record<string, unknown>;
   } else {
     session = await loadSessionState(client, options.mount, { workspaceConfig });
