@@ -18,6 +18,15 @@ import type {
   WriteStep,
 } from "./types.js";
 
+function isNotFoundError(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    (((error as { status?: number }).status === 404) ||
+      (error as { constructor?: { name?: string } }).constructor?.name === "NotFoundError")
+  );
+}
+
 export function toPlain(value: unknown): unknown {
   if (value === null || value === undefined) return value;
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
@@ -168,7 +177,7 @@ async function paginateOrderedQuery(
     try {
       response = await namespaceHandle.query(currentPayload as never);
     } catch (error) {
-      if ((error as { name?: string }).name === "NotFoundError") {
+      if (isNotFoundError(error)) {
         break;
       }
       throw error;
@@ -219,7 +228,7 @@ export async function runStep(
       const response = await namespaceHandle.query(step.payload as never);
       return normalizeQueryResult(step.name, response);
     } catch (error) {
-      if ((error as { name?: string }).name === "NotFoundError") {
+      if (isNotFoundError(error)) {
         return normalizeQueryResult(step.name, { rows: [] });
       }
       throw error;
