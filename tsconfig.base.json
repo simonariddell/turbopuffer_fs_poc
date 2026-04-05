@@ -3,6 +3,10 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@workspace/turbopuffer-fs": ["packages/turbopuffer-fs/src/index.ts"]
+    },
     "strict": true,
     "declaration": true,
     "declarationMap": true,
