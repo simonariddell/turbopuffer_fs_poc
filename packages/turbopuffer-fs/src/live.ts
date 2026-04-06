@@ -169,6 +169,8 @@ export function rm(client: Turbopuffer, mount: string, path: string, recursive =
   return runPlan(client, rmPlan(mountNamespace(mount), path, recursive));
 }
 
+export { replaceTextInFile } from "./edit.js";
+
 export async function deleteMount(client: Turbopuffer, mount: string): Promise<{ mount: string; namespace: string; deleted: true }> {
   const namespace = mountNamespace(mount);
   await client.namespace(namespace).deleteAll();
