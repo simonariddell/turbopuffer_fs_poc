@@ -250,13 +250,17 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
   }
 
   const client = clientFromParsed(parsed);
-  const bundleRoot = typeof parsed.flags["bundle-root"] === "string" ? parsed.flags["bundle-root"] : undefined;
-  const workspaceConfig = resolveWorkspaceConfig({
-    deploymentConfig: parsed.workspaceConfigPath ? JSON.parse(await readFileNode(parsed.workspaceConfigPath, "utf8")) as Record<string, unknown> : undefined,
-    bundleSpec: bundleRoot ? await loadBundleSpec(bundleRoot) : undefined,
-  });
 
   try {
+    const bundleRoot =
+      typeof parsed.flags["bundle-root"] === "string" ? parsed.flags["bundle-root"] : undefined;
+    const workspaceConfig = resolveWorkspaceConfig({
+      deploymentConfig: parsed.workspaceConfigPath
+        ? (JSON.parse(await readFileNode(parsed.workspaceConfigPath, "utf8")) as Record<string, unknown>)
+        : undefined,
+      bundleSpec: bundleRoot ? await loadBundleSpec(bundleRoot) : undefined,
+    });
+
     let result: unknown;
     switch (parsed.command) {
       case "mounts":

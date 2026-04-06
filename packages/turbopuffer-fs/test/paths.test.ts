@@ -14,6 +14,7 @@ import {
   subtreeFilter,
   withAfterFilter,
 } from "../src/paths.js";
+import { resolveUserPath } from "../src/workspace.js";
 
 describe("paths", () => {
   it("normalizes root and repeated slashes", () => {
@@ -57,5 +58,14 @@ describe("paths", () => {
       "And",
       [["kind", "Eq", "file"], ["path", "Gt", "/b"]],
     ]);
+  });
+
+  it("resolves cwd-relative path edge cases lexically", () => {
+    expect(resolveUserPath("", { cwd: "/project/src" })).toBe("/project/src");
+    expect(resolveUserPath(".", { cwd: "/project/src" })).toBe("/project/src");
+    expect(resolveUserPath("./", { cwd: "/project/src" })).toBe("/project/src");
+    expect(resolveUserPath("..", { cwd: "/project/src" })).toBe("/project");
+    expect(resolveUserPath("../../..", { cwd: "/project/src" })).toBe("/");
+    expect(resolveUserPath("../../../notes.txt", { cwd: "/project/src" })).toBe("/notes.txt");
   });
 });

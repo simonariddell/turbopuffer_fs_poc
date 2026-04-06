@@ -109,8 +109,12 @@ describeLive("tpfs restart harness", () => {
           },
         });
         expect(session.cwd).toBe("/project/work");
+        expect(session.path).toBe("/state/session.json");
         const text = await readText(client, mount, "/project/work/notes.txt");
         expect(String(text)).toBe("first\nsecond\n");
+        const logText = await readText(client, mount, "/logs/run.jsonl");
+        expect(String(logText)).toContain('"command":"cd work"');
+        expect(String(logText)).toContain('"cwd_after":"/project/work"');
       },
     },
     {

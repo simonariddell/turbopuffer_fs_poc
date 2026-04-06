@@ -55,11 +55,23 @@ describe("hydration", () => {
       workspaceConfig,
     });
 
+    expect(manifest.mount).toBe("documents");
     expect(manifest.cwd).toBe("/project");
+    expect(manifest.root).toBe("/");
+    expect(manifest.workspace_metadata_path).toBe("/state/workspace.json");
+    expect(manifest.snapshot).toEqual(manifest.entries);
+    expect(manifest.entries["/state/workspace.json"]).toMatchObject({
+      path: "/state/workspace.json",
+      kind: "file",
+      is_text: 1,
+    });
     const notesEntry = manifest.entries["/project/notes.txt"];
     expect(notesEntry).toMatchObject({
+      path: "/project/notes.txt",
       kind: "file",
       mime: "text/plain",
+      size_bytes: 11,
+      is_text: 1,
     });
     expect(await readFile(join(localRoot, "project", "notes.txt"), "utf8")).toBe("hello world");
   });
@@ -117,9 +129,13 @@ describe("hydration", () => {
       workspaceConfig,
     });
 
+    expect(result.mount).toBe("documents");
+    expect(result.root).toBe("/");
     expect(result.modified).toContain("/project/notes.txt");
     expect(result.created).toContain("/project/new.txt");
     expect(result.deleted).toContain("/project/old.txt");
+    expect(result.unchanged).toContain("/project");
+    expect(result.conflicts).toEqual([]);
 
     const rows = namespace.snapshotRows();
     expect(rows.find((row) => row.path === "/project/notes.txt")?.text).toBe("hello tpfs");
@@ -180,6 +196,10 @@ describe("hydration", () => {
     });
 
     const result = await syncWorkspace(client as never, "documents", localRoot, manifest);
+    expect(result.created).toEqual([]);
+    expect(result.modified).toEqual([]);
+    expect(result.deleted).toEqual([]);
+    expect(result.unchanged).toContain("/project");
     expect(result.conflicts).toContainEqual({
       path: "/project/notes.txt",
       reason: "remote_changed_since_hydration",

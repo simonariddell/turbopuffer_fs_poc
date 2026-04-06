@@ -136,6 +136,32 @@ describe("edit helper", () => {
         search: "A",
         replace: "B",
       }),
-    ).rejects.toThrow("ValueError:path is a binary file: /project/blob.bin");
+    ).rejects.toThrow("NonTextFileError:/project/blob.bin");
+  });
+
+  it("fails for missing files", async () => {
+    const client = new FakeClient();
+    const workspaceConfig = resolveWorkspaceConfig();
+    await workspaceInit(client as never, "documents", { workspaceConfig });
+
+    await expect(
+      replaceTextInFile(client as never, "documents", "/project/missing.txt", {
+        search: "missing",
+        replace: "tpfs",
+      }),
+    ).rejects.toThrow("FileNotFoundError:/project/missing.txt");
+  });
+
+  it("fails for directory targets", async () => {
+    const client = new FakeClient();
+    const workspaceConfig = resolveWorkspaceConfig();
+    await workspaceInit(client as never, "documents", { workspaceConfig });
+
+    await expect(
+      replaceTextInFile(client as never, "documents", "/project", {
+        search: "hello",
+        replace: "tpfs",
+      }),
+    ).rejects.toThrow("IsADirectoryError:/project");
   });
 });
