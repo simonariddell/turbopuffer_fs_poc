@@ -147,6 +147,31 @@ Each log entry MUST contain at least:
 - `stdout_preview`
 - `stderr_preview`
 
+### 4.9 Content classification and MIME
+
+- Implementations MUST distinguish text-file and binary-file durable
+  representations.
+- Text files MUST be readable through text-read operations.
+- Binary files MUST fail explicit text-read operations.
+- Implementations MAY infer text-vs-binary classification from bytes, file
+  extension, MIME heuristics, or an equivalent deterministic policy.
+- Implementations MAY accept explicit MIME overrides on writes.
+- MIME metadata, when present, SHOULD be preserved across whole-file rewrites
+  and durable copies where practical.
+
+### 4.10 Whole-object storage model and size behavior
+
+- TPFS is a whole-object durable storage model, not a random-write block model.
+- `putText`, `putBytes`, text replacement helpers, and hydration/sync writes
+  MUST behave as whole-file rewrites.
+- Implementations MUST NOT claim chunked random-write semantics unless they are
+  explicitly implemented and documented.
+- The core TPFS contract does not currently require a universal maximum file
+  size.
+- If a deployment or implementation imposes a file-size limit, oversized
+  operations MUST fail explicitly and MUST NOT silently truncate or partially
+  accept content while claiming success.
+
 ---
 
 ## 5. Path model

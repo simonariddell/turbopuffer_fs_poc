@@ -65,6 +65,29 @@ That means:
 If a machine dies, another machine should be able to recover from turbopuffer
 alone.
 
+## Content model and size semantics
+
+TPFS uses a deliberately simple whole-object content model:
+
+- text files are stored in full in `text`
+- binary files are stored in full in `blob_b64`
+- writes are whole-file overwrites, not random-write patches
+- append is implemented as durable read/modify/write
+- hydration/sync also operates on whole-file content
+
+Text vs binary behavior is intentionally predictable:
+
+- text and binary classification is inferred from bytes, file extension, and
+  MIME heuristics
+- callers may also provide an explicit MIME override for writes
+- binary files round-trip as bytes
+- text reads fail explicitly on binary targets
+
+TPFS does not currently advertise chunked-write or random-write semantics.
+Likewise, the current contract does not define a universal hard file-size cap.
+If a deployment introduces size limits, TPFS should fail explicitly rather than
+silently truncating content.
+
 ## Installation
 
 ```bash
