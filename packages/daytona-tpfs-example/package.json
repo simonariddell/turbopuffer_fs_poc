@@ -1,0 +1,19 @@
+{
+  "name": "@workspace/daytona-tpfs-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/host.js"
+  },
+  "dependencies": {
+    "@daytonaio/sdk": "^0.161.0",
+    "@workspace/tpfs-shell": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "esbuild": "^0.28.0"
+  }
+}

@@ -5,7 +5,8 @@
     "moduleResolution": "NodeNext",
     "baseUrl": ".",
     "paths": {
-      "@workspace/turbopuffer-fs": ["packages/turbopuffer-fs/src/index.ts"]
+      "@workspace/turbopuffer-fs": ["packages/turbopuffer-fs/src/index.ts"],
+      "@workspace/tpfs-shell": ["packages/tpfs-shell/src/index.ts"]
     },
     "strict": true,
     "declaration": true,
