@@ -166,12 +166,33 @@ console.log(await readText(client, "documents", "/notes/hello.txt"));
 
 ## CLI
 
-The TypeScript core ships the canonical `tpfs` CLI:
+The TypeScript core ships the canonical `tpfs` CLI. This is the preferred
+machine-consumable bridge for downstream runtimes, including non-TypeScript
+consumers that need the generic durable workspace/filesystem contract without
+re-implementing TPFS semantics locally.
+
+CLI results are JSON by default. Downstream consumers should treat the JSON
+output and JSON error envelopes as the stable integration surface for:
+
+- workspace lifecycle operations
+- durable cwd/session operations
+- deterministic text replacement
+- hydration manifests
+- sync results and conflicts
+
+Representative commands:
 
 ```bash
 pnpm --filter @workspace/turbopuffer-fs build
 pnpm exec tpfs --region aws-us-west-2 mounts
 pnpm exec tpfs --region aws-us-west-2 ls documents /notes
+pnpm exec tpfs --region aws-us-west-2 workspace-init documents
+pnpm exec tpfs --region aws-us-west-2 workspace-show documents
+pnpm exec tpfs --region aws-us-west-2 pwd documents
+pnpm exec tpfs --region aws-us-west-2 cd documents /project
+pnpm exec tpfs --region aws-us-west-2 replace-text documents /project/notes.txt --search world --replace tpfs
+pnpm exec tpfs --region aws-us-west-2 hydrate documents /tmp/tpfs-sandbox --manifest-out /tmp/tpfs-manifest.json
+pnpm exec tpfs --region aws-us-west-2 sync documents /tmp/tpfs-sandbox --manifest-file /tmp/tpfs-manifest.json
 pnpm exec tpfs --region aws-us-west-2 put-text documents /notes/todo.txt --stdin
 pnpm exec tpfs --region aws-us-west-2 grep documents / oauth --ignore-case
 pnpm exec tpfs --region aws-us-west-2 grep documents / "oauth.*token" --mode regex --ignore-case
@@ -180,6 +201,10 @@ pnpm exec tpfs --region aws-us-west-2 search documents / "oauth token" --mode bm
 
 Use `--api-key`, `--region`, or `--base-url` explicitly, or rely on the
 corresponding environment variables in your shell.
+
+For command failures, the CLI emits structured JSON on stderr with a stable
+error code and message. Downstream consumers should use the error code rather
+than reverse-engineering arbitrary message text.
 
 `grep` is now mode-aware:
 
@@ -252,6 +277,27 @@ level agent runtimes distinguish:
 - an active durable workspace
 - an archived workspace
 
+The canonical workspace metadata shape contains at least:
+
+- `path`
+- `mount`
+- `workspace_kind`
+- `created_at`
+- `updated_at`
+- `status`
+- `session_state`
+- `entrypoint`
+- `bundle_manifest`
+- `logs_dir`
+- `output_dir`
+- `scratch_dir`
+- `project_dir`
+- `input_dir`
+
+Optional metadata such as `owner_id`, `source_id`, `work_item_id`, `task_id`,
+`bundle_id`, and `tags` may also be present. This metadata is durable workspace
+identity/state, not downstream product-specific UI or orchestration state.
+
 CLI examples:
 
 ```bash
@@ -268,6 +314,18 @@ pnpm exec tpfs cat documents src/file.ts
 
 Task bundles can override parts of the workspace profile via a `workspace`
 section in `bundle.json`.
+
+Durable session state is likewise canonical. By default it lives at
+`/state/session.json` and contains:
+
+- `cwd`
+- `mount`
+- `updated_at`
+- `path`
+
+Optional fields such as `bundle_id` and future metadata are preserved when TPFS
+updates cwd. `cwd` is the single durable source of truth for restartable shell
+and CLI behavior.
 
 ## Agent-safe editing
 
@@ -286,10 +344,22 @@ await replaceTextInFile(client, "documents", "/project/notes.txt", {
 The helper:
 
 - reads through TPFS
+- fails on missing files
+- fails on directory targets
+- fails on binary / non-text targets
 - requires a text file
 - fails explicitly on zero matches or ambiguous multi-match replacements
 - rewrites the file durably through TPFS
-- returns simple change metadata including match count and before/after hashes
+- preserves MIME where practical
+- returns canonical change metadata:
+  - `path`
+  - `matches`
+  - `changed`
+  - `before_text`
+  - `after_text`
+  - `before_sha256`
+  - `after_sha256`
+  - optional `mime`
 
 ## Hydration and sync
 
@@ -310,10 +380,25 @@ const result = await syncWorkspace(client, "documents", "/tmp/tpfs-sandbox", man
 
 Current sync semantics are intentionally simple and conservative:
 
-- hydrate produces a snapshot manifest
+- hydrate produces a snapshot manifest containing:
+  - `mount`
+  - `hydrated_at`
+  - `root`
+  - `cwd`
+  - `workspace_metadata_path`
+  - per-path snapshot metadata with:
+    - `path`
+    - `kind`
+    - `sha256`
+    - `mime`
+    - `size_bytes`
+    - `is_text`
 - sync detects created, modified, deleted, and unchanged paths
 - sync skips unchanged paths
 - sync reports conflicts when a touched remote path changed after hydration
+- conflicts are explicit objects containing at least:
+  - `path`
+  - `reason`
 - binary files round-trip as bytes
 
 Local sandboxes are execution mirrors only; TPFS remains the durable source of

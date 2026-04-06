@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as bundles from "../src/bundles.js";
 import * as dogfood from "../src/dogfood.js";
+import * as edit from "../src/edit.js";
+import * as hydration from "../src/hydration.js";
 import * as live from "../src/live.js";
 import * as workspace from "../src/workspace.js";
 import { runCli, type CliIO } from "../src/cli.js";
@@ -91,13 +93,10 @@ describe("cli", () => {
       updated_at: "2026-04-05T00:00:00.000Z",
       path: "/state/session.json",
     });
-    vi.spyOn(workspace, "saveSessionState").mockResolvedValue({
+    const workspaceCdSpy = vi.spyOn(workspace, "workspaceCd").mockResolvedValue({
       cwd: "/output",
       mount: "documents",
-      updated_at: "2026-04-05T00:00:01.000Z",
-      path: "/state/session.json",
     });
-    vi.spyOn(live, "stat").mockResolvedValue({ path: "/output", kind: "dir" } as never);
 
     const pwdIo = createIo();
     expect(await runCli(["pwd", "documents"], pwdIo.io)).toBe(0);
@@ -106,6 +105,12 @@ describe("cli", () => {
     const cdIo = createIo();
     expect(await runCli(["cd", "documents", "../output"], cdIo.io)).toBe(0);
     expect(JSON.parse(cdIo.stdout.join(""))).toEqual({ cwd: "/output", mount: "documents" });
+    expect(workspaceCdSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      "../output",
+      { workspaceConfig: workspace.defaultWorkspaceConfig() },
+    );
   });
 
   it("supports workspace show and existence commands", async () => {
@@ -355,5 +360,192 @@ describe("cli", () => {
       "oauth token",
       expect.objectContaining({ mode: "bm25" }),
     );
+  });
+
+  it("supports replace-text with structured success output", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+      bundle_id: "bundle-1",
+    });
+    const replaceSpy = vi.spyOn(edit, "replaceTextInFile").mockResolvedValue({
+      path: "/project/notes.txt",
+      matches: 1,
+      changed: true,
+      before_text: "hello world",
+      after_text: "hello tpfs",
+      before_sha256: "before",
+      after_sha256: "after",
+      mime: "text/plain",
+    } as never);
+
+    const { io, stdout, stderr } = createIo();
+    const code = await runCli([
+      "replace-text",
+      "documents",
+      "notes.txt",
+      "--search",
+      "world",
+      "--replace",
+      "tpfs",
+    ], io);
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(replaceSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      "/project/notes.txt",
+      expect.objectContaining({
+        search: "world",
+        replace: "tpfs",
+        requireUnique: true,
+      }),
+    );
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      path: "/project/notes.txt",
+      matches: 1,
+      changed: true,
+      before_sha256: "before",
+      after_sha256: "after",
+    });
+  });
+
+  it("supports hydrate and sync commands with manifest files", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    const hydrateSpy = vi.spyOn(hydration, "hydrateWorkspace").mockResolvedValue({
+      mount: "documents",
+      hydrated_at: "2026-04-05T00:00:00.000Z",
+      root: "/",
+      cwd: "/project",
+      workspace_metadata_path: "/state/workspace.json",
+      entries: {
+        "/project/notes.txt": {
+          path: "/project/notes.txt",
+          kind: "file",
+          sha256: "abc",
+          mime: "text/plain",
+          size_bytes: 11,
+          is_text: 1,
+        },
+      },
+      snapshot: {
+        "/project/notes.txt": {
+          path: "/project/notes.txt",
+          kind: "file",
+          sha256: "abc",
+          mime: "text/plain",
+          size_bytes: 11,
+          is_text: 1,
+        },
+      },
+    } as never);
+    const syncSpy = vi.spyOn(hydration, "syncWorkspace").mockResolvedValue({
+      mount: "documents",
+      root: "/",
+      created: ["/project/new.txt"],
+      modified: ["/project/notes.txt"],
+      deleted: [],
+      unchanged: ["/project/unchanged.txt"],
+      conflicts: [],
+    } as never);
+
+    const tempRoot = await mkdtemp(join(tmpdir(), "tpfs-cli-hydration-"));
+    const localRoot = join(tempRoot, "sandbox");
+    const manifestPath = join(tempRoot, "manifest.json");
+    await mkdir(localRoot, { recursive: true });
+
+    const hydrateIo = createIo();
+    expect(
+      await runCli(["hydrate", "documents", localRoot, "--manifest-out", manifestPath], hydrateIo.io),
+    ).toBe(0);
+    expect(hydrateSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      localRoot,
+      expect.objectContaining({ workspaceConfig: workspace.defaultWorkspaceConfig() }),
+    );
+    const savedManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    expect(savedManifest).toMatchObject({
+      mount: "documents",
+      cwd: "/project",
+      workspace_metadata_path: "/state/workspace.json",
+    });
+
+    const syncIo = createIo();
+    expect(
+      await runCli(["sync", "documents", localRoot, "--manifest-file", manifestPath], syncIo.io),
+    ).toBe(0);
+    expect(syncSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      "documents",
+      localRoot,
+      expect.objectContaining({
+        mount: "documents",
+        snapshot: expect.any(Object),
+      }),
+      { workspaceConfig: workspace.defaultWorkspaceConfig() },
+    );
+    expect(JSON.parse(syncIo.stdout.join(""))).toEqual({
+      mount: "documents",
+      root: "/",
+      created: ["/project/new.txt"],
+      modified: ["/project/notes.txt"],
+      deleted: [],
+      unchanged: ["/project/unchanged.txt"],
+      conflicts: [],
+    });
+  });
+
+  it("emits structured parse and domain errors", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "loadSessionState").mockResolvedValue({
+      cwd: "/project",
+      mount: "documents",
+      updated_at: "2026-04-05T00:00:00.000Z",
+      path: "/state/session.json",
+    });
+    vi.spyOn(edit, "replaceTextInFile").mockRejectedValue(
+      new Error("ReplaceTextNoMatchError:/project/notes.txt"),
+    );
+
+    const parseIo = createIo();
+    expect(await runCli([], parseIo.io)).toBe(2);
+    expect(JSON.parse(parseIo.stderr.join(""))).toEqual({
+      error: {
+        error: "Error",
+        code: "ParseError",
+        message: "missing command",
+      },
+    });
+
+    const domainIo = createIo();
+    expect(
+      await runCli([
+        "replace-text",
+        "documents",
+        "notes.txt",
+        "--search",
+        "missing",
+        "--replace",
+        "tpfs",
+      ], domainIo.io),
+    ).toBe(1);
+    expect(JSON.parse(domainIo.stderr.join(""))).toEqual({
+      error: {
+        error: "ReplaceTextNoMatchError",
+        code: "ReplaceTextNoMatchError",
+        message: "ReplaceTextNoMatchError:/project/notes.txt",
+        details: {
+          path: "/project/notes.txt",
+        },
+      },
+    });
   });
 });

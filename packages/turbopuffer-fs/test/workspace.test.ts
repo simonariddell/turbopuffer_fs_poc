@@ -78,6 +78,10 @@ describe("workspace", () => {
     expect(resolveUserPath("src/main.ts", { cwd: "/project" })).toBe("/project/src/main.ts");
     expect(resolveUserPath("../output/report.md", { cwd: "/project/src" })).toBe("/project/output/report.md");
     expect(resolveUserPath("/absolute/path", { cwd: "/project" })).toBe("/absolute/path");
+    expect(resolveUserPath("", { cwd: "/project" })).toBe("/project");
+    expect(resolveUserPath(".", { cwd: "/project" })).toBe("/project");
+    expect(resolveUserPath("./", { cwd: "/project" })).toBe("/project");
+    expect(resolveUserPath("../../../../logs", { cwd: "/project" })).toBe("/logs");
   });
 
   it("allows explicit overrides to win", () => {
@@ -180,6 +184,41 @@ describe("workspace", () => {
     expect(persisted.mount).toBe("documents");
   });
 
+  it("preserves unrelated session metadata when saving and changing cwd", async () => {
+    const client = new FakeClient();
+    const workspaceConfig = resolveWorkspaceConfig();
+
+    await workspaceInit(client as never, "documents", {
+      workspaceConfig,
+      cwd: "/project",
+      bundleId: "bundle-7",
+    });
+
+    const saved = await saveSessionState(
+      client as never,
+      "documents",
+      {
+        cwd: "/project",
+        mount: "documents",
+        bundle_id: "bundle-7",
+        future_metadata: { marker: true },
+      },
+      { workspaceConfig },
+    );
+    expect(saved.bundle_id).toBe("bundle-7");
+    expect((saved as Record<string, unknown>).future_metadata).toEqual({ marker: true });
+
+    const changed = await workspaceCd(client as never, "documents", ".", { workspaceConfig });
+    expect(changed).toEqual({
+      cwd: "/project",
+      mount: "documents",
+    });
+
+    const reloaded = await loadSessionState(client as never, "documents", { workspaceConfig });
+    expect(reloaded.bundle_id).toBe("bundle-7");
+    expect((reloaded as Record<string, unknown>).future_metadata).toEqual({ marker: true });
+  });
+
   it("validates workspaceCd targets", async () => {
     const client = new FakeClient();
     const workspaceConfig = resolveWorkspaceConfig();
@@ -241,6 +280,10 @@ describe("workspace", () => {
     const archived = await archiveWorkspace(client as never, "documents", { workspaceConfig });
     expect(archived.archived).toBe(true);
     expect((archived.metadata as { status: string }).status).toBe("archived");
+
+    const shown = await workspaceShow(client as never, "documents", { workspaceConfig });
+    expect(shown.exists).toBe(true);
+    expect(shown.metadata?.status).toBe("archived");
 
     const deleted = await deleteWorkspace(client as never, "documents");
     expect(deleted).toEqual({

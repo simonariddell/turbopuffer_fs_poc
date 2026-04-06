@@ -117,6 +117,9 @@ normative requirements.
   `session_state` path.
 - Default path:
   - `/state/session.json`
+- `/state/session.json` is the canonical session-state contract path for the
+  default TPFS workspace profile and downstream runtimes SHOULD target that path
+  unless they intentionally consume an explicit alternate workspace profile.
 
 Required fields:
 
@@ -129,6 +132,16 @@ Optional fields MAY include:
 
 - `bundle_id`
 - future workspace/session metadata
+
+Session-state contract requirements:
+
+- `cwd` MUST be the single durable source of truth for shell working-directory
+  continuity.
+- restart/recovery MUST load cwd from the persisted session-state document.
+- a failing cwd change such as `cd` to a missing path or non-directory MUST NOT
+  durably persist an invalid cwd.
+- session-state updates MUST preserve unrelated metadata fields unless the
+  implementation explicitly intends to remove them.
 
 ### 4.8 Command log document
 
@@ -197,6 +210,8 @@ Implementations MUST:
 - collapse repeated separators
 - reject or normalize trivial relative markers where appropriate
 - preserve logical identity for equivalent absolute paths
+- apply lexical normalization only; normalization MUST NOT consult host
+  filesystem state
 
 Implementations MUST NOT:
 
@@ -210,6 +225,8 @@ When resolving a user path against cwd:
 - `""`, `null`, `undefined`, `"."`, and `"./"` MUST resolve to cwd
 - absolute paths MUST remain absolute
 - `..` segments MUST resolve lexically against cwd and MUST clamp at root
+- resolution MUST be purely lexical and MUST NOT depend on host symlinks,
+  platform separators, case-folding rules, or any other host-filesystem state
 
 ### 5.5 Glob paths
 
@@ -248,8 +265,12 @@ Later layers SHOULD override earlier layers.
 
 ### 6.3 Workspace metadata document
 
-- Workspace metadata SHOULD be durably persisted as a document stored at:
+- Workspace metadata MUST be durably persisted as a document stored at:
   - `/state/workspace.json`
+- `/state/workspace.json` is the canonical durable workspace metadata path for
+  the default TPFS workspace profile and downstream runtimes SHOULD target that
+  path unless they intentionally consume an explicit alternate workspace
+  profile.
 
 Required fields:
 
@@ -277,6 +298,14 @@ Optional fields MAY include:
 - `bundle_id`
 - `tags`
 
+Workspace-metadata contract requirements:
+
+- workspace metadata MUST represent durable workspace identity/state, not
+  product-specific orchestration metadata.
+- downstream runtimes MAY attach optional identifiers such as `task_id` or
+  `work_item_id`, but TPFS MUST treat them as optional opaque metadata rather
+  than first-class orchestration semantics.
+
 ### 6.4 Workspace initialization
 
 When initializing a fresh mount:
@@ -285,10 +314,10 @@ When initializing a fresh mount:
 - the session-state parent directory MUST exist durably
 - the workspace-metadata parent directory MUST exist durably
 - the initial session-state document MUST be durably written
-- the initial workspace-metadata document SHOULD be durably written
+- the initial workspace-metadata document MUST be durably written
 - if a bundle id is known at initialization time, it MUST be persisted into the
   initial session state
-- if a workspace kind is known at initialization time, it SHOULD be persisted
+- if a workspace kind is known at initialization time, it MUST be persisted
   into the initial workspace metadata
 
 ### 6.5 Workspace lifecycle helpers
@@ -301,10 +330,14 @@ Recommended operations:
   - returns `true` iff the mount contains a durable initialized workspace
 - `workspaceShow(mount)`
   - returns workspace config plus durable metadata/session state when present
+  - MUST report whether the durable workspace exists without inventing
+    product-specific status
 - `deleteWorkspace(mount)`
   - durably removes workspace state from the mount namespace
+  - MUST remove durable workspace state rather than merely hiding it locally
 - `archiveWorkspace(mount)`
   - durably marks workspace metadata as archived
+  - MUST preserve durable identity/metadata while changing the lifecycle status
 
 ---
 
@@ -752,17 +785,27 @@ Purpose:
 Semantics:
 
 - the target MUST exist
+- the operation MUST read the current file contents through TPFS
+- the operation MUST fail for directory targets
 - the target MUST be a text file
+- the operation MUST fail for binary/non-text targets
 - replacement matching MUST occur against the current durable file contents
 - if uniqueness is required, zero matches or multiple matches MUST fail
+- ambiguous multi-match edits MUST fail unless the caller explicitly opts out of
+  uniqueness requirements
 - the resulting file MUST be durably rewritten as a whole-file update
+- MIME metadata, when present, SHOULD be preserved across the durable rewrite
 
-Output SHOULD include:
+Minimum result shape MUST include:
 
 - `path`
 - `matches`
-- before/after content hashes
-- optional change metadata such as before/after text preview
+- `changed`
+- `before_text`
+- `after_text`
+- `before_sha256`
+- `after_sha256`
+- optional `mime`
 
 ### 8.22 `hydrateWorkspace(mount, localRoot, options)` / `syncWorkspace(mount, localRoot, manifest)`
 
@@ -778,14 +821,52 @@ Hydration semantics:
 - hydration MUST materialize text and binary files faithfully
 - hydration MUST return a manifest or snapshot describing the hydrated state
 
+Hydration manifest shape MUST include:
+
+- `mount`
+- `hydrated_at`
+- `root`
+- `cwd`
+- `workspace_metadata_path`
+- per-path snapshot metadata
+
+Each per-path snapshot entry MUST include enough metadata for later sync
+comparison, including at least:
+
+- `path`
+- `kind`
+- `sha256`
+- optional `mime`
+- `size_bytes`
+- `is_text`
+
 Sync semantics:
 
 - sync MUST compare the local tree against the hydration snapshot
 - sync MUST detect created, modified, deleted, and unchanged paths
-- sync SHOULD skip unchanged paths
+- sync MUST skip unchanged paths instead of rewriting them durably
 - sync MUST detect remote changes to touched paths since hydration
 - if conflicts are detected, the implementation MUST surface them explicitly
 - binary files MUST round-trip byte-for-byte
+- sync MUST NOT silently claim success when a touched path changed remotely
+  after hydration
+
+Sync result shape MUST include:
+
+- `created`
+- `modified`
+- `deleted`
+- `unchanged`
+- `conflicts`
+
+Conflict entries MUST have a stable shape including:
+
+- `path`
+- `reason`
+
+At minimum, TPFS implementations MUST support the reason:
+
+- `remote_changed_since_hydration`
 
 Concurrency model:
 
@@ -794,6 +875,49 @@ Concurrency model:
 - implementations MUST document which behavior they choose
 - implementations MUST NOT silently claim conflict-free synchronization when a
   touched remote path changed since hydration
+
+### 8.23 CLI and machine-consumable bridge contract
+
+Purpose:
+
+- expose the canonical TPFS contract to downstream runtimes through a stable
+  machine-consumable interface
+
+CLI requirements:
+
+- the canonical TPFS CLI MUST expose structured JSON output for the public
+  downstream bridge commands
+- implementations MAY emit structured JSON by default and MAY additionally
+  accept `--json` as an explicit compatibility flag
+- the CLI surface SHOULD remain generic and MUST NOT encode product-specific
+  orchestration semantics
+
+Required bridge commands include:
+
+- `workspace-init`
+- `workspace-show`
+- `workspace-exists`
+- `workspace-archive`
+- `workspace-delete`
+- `pwd`
+- `cd`
+- `replace-text` or an equivalent generic text-edit command
+- `hydrate` or an equivalent generic hydration command
+- `sync` or an equivalent generic sync command
+
+Error requirements:
+
+- CLI failures MUST be explicit and machine-consumable
+- structured error output MUST provide a stable error code and message
+- known filesystem/editing errors SHOULD preserve stable codes such as:
+  - `FileNotFoundError`
+  - `IsADirectoryError`
+  - `NotADirectoryError`
+  - `ReplaceTextNoMatchError`
+  - `ReplaceTextMatchCountError`
+  - a stable non-text/binary edit error code
+- sync conflicts MAY be returned as structured result data instead of a thrown
+  CLI failure, but they MUST remain explicit and machine-consumable
 
 ---
 
