@@ -9,6 +9,12 @@ export type FsSchema = Record<string, unknown>;
 
 export type GrepMode = "literal" | "regex" | "bm25";
 
+export type GrepStrategy =
+  | "regex_remote_candidates_then_local_finalize"
+  | "regex_scope_only_then_local_finalize"
+  | "literal_substring_candidates_then_local_finalize"
+  | "bm25_ranked_direct";
+
 export interface GrepOptions {
   mode?: GrepMode;
   glob?: string | null;
@@ -17,6 +23,41 @@ export interface GrepOptions {
   multiline?: boolean;
   dotAll?: boolean;
   lastAsPrefix?: boolean;
+}
+
+export interface GrepRequest {
+  namespace: string;
+  root: string;
+  pattern: string;
+  options: GrepOptions;
+}
+
+export interface GrepCandidateQueryPlan extends AnyObject {
+  name: string;
+  payload: AnyObject;
+  paginate?: boolean;
+  limit?: number | null;
+  pageSize?: number;
+  orderField?: string;
+}
+
+export interface GrepScopePlan extends AnyObject {
+  namespace: string;
+  normalizedRoot: string;
+  filters: AnyObject;
+  whereText: string;
+}
+
+export interface GrepPlanArtifact extends AnyObject {
+  request: GrepRequest;
+  mode: GrepMode;
+  strategy: GrepStrategy;
+  scope: GrepScopePlan;
+  candidateQuery: GrepCandidateQueryPlan;
+  candidateQueryText: string;
+  finalize: string;
+  finalizeMode: "exact_lines" | "ranked_hits";
+  context: AnyObject;
 }
 
 export interface GrepLineMatch extends AnyObject {
@@ -35,6 +76,47 @@ export interface GrepSearchHit extends AnyObject {
 }
 
 export type GrepResult = GrepLineMatch[] | GrepSearchHit[];
+
+export type GrepPlannerStrategy =
+  | "regex_scope_then_exact_lines"
+  | "literal_prefilter_then_exact_lines"
+  | "bm25_ranked_direct";
+
+export type GrepFinalizationMode =
+  | "exact_regex_lines"
+  | "exact_literal_lines"
+  | "ranked_bm25_hits";
+
+export interface GrepFollowupQuery {
+  name: string;
+  payload: AnyObject;
+  payloadText: string;
+}
+
+export interface GrepPlannerStage {
+  strategy: GrepPlannerStrategy;
+  candidateQuery: AnyObject;
+  candidateQueryText: string;
+  followupQueries: GrepFollowupQuery[];
+  finalization: GrepFinalizationMode;
+}
+
+export interface GrepPlannerArtifact {
+  request: {
+    root: string;
+    pattern: string;
+    mode: GrepMode;
+    glob: string | null;
+    limit: number;
+    ignoreCase: boolean;
+    multiline: boolean;
+    dotAll: boolean;
+    lastAsPrefix: boolean;
+  };
+  plan: Plan;
+  stage: GrepPlannerStage;
+  planText: string;
+}
 
 export interface QueryStep {
   kind: "query";

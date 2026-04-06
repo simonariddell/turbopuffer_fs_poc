@@ -59,15 +59,24 @@ describe("plans", () => {
 
   it("builds grep plan with coarse text filter", () => {
     const plan = grepPlan("documents__fs", "/notes", "oauth", {
+      mode: "literal",
       ignoreCase: true,
       glob: "*.md",
     });
     const candidates = asQueryStep(plan.steps[1]!);
-    const filters = (candidates.payload.filters as [string, unknown[]])[1];
-    expect(filters).toContainEqual(["kind", "Eq", "file"]);
-    expect(filters).toContainEqual(["is_text", "Eq", 1]);
-    expect(filters).toContainEqual(["basename", "IGlob", "*.md"]);
-    expect(filters).toContainEqual(["text", "IGlob", "*oauth*"]);
+    const filters = candidates.payload.filters as [unknown, unknown[]];
+    expect(filters[0]).toBe("And");
+    const clauses = filters[1];
+    expect(clauses[0]).toEqual([
+      "And",
+      [
+        ["kind", "Eq", "file"],
+        ["is_text", "Eq", 1],
+        ["Or", [["path", "Eq", "/notes"], ["path", "Glob", "/notes/**"]]],
+        ["basename", "IGlob", "*.md"],
+      ],
+    ]);
+    expect(clauses[1]).toEqual(["text", "IGlob", "*oauth*"]);
   });
 
   it("builds regex grep plans without coarse text substring filters", () => {
