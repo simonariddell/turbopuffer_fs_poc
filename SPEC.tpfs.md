@@ -147,6 +147,31 @@ Each log entry MUST contain at least:
 - `stdout_preview`
 - `stderr_preview`
 
+### 4.9 Content classification and MIME
+
+- Implementations MUST distinguish text-file and binary-file durable
+  representations.
+- Text files MUST be readable through text-read operations.
+- Binary files MUST fail explicit text-read operations.
+- Implementations MAY infer text-vs-binary classification from bytes, file
+  extension, MIME heuristics, or an equivalent deterministic policy.
+- Implementations MAY accept explicit MIME overrides on writes.
+- MIME metadata, when present, SHOULD be preserved across whole-file rewrites
+  and durable copies where practical.
+
+### 4.10 Whole-object storage model and size behavior
+
+- TPFS is a whole-object durable storage model, not a random-write block model.
+- `putText`, `putBytes`, text replacement helpers, and hydration/sync writes
+  MUST behave as whole-file rewrites.
+- Implementations MUST NOT claim chunked random-write semantics unless they are
+  explicitly implemented and documented.
+- The core TPFS contract does not currently require a universal maximum file
+  size.
+- If a deployment or implementation imposes a file-size limit, oversized
+  operations MUST fail explicitly and MUST NOT silently truncate or partially
+  accept content while claiming success.
+
 ---
 
 ## 5. Path model
@@ -221,15 +246,65 @@ An implementation SHOULD resolve workspace config in this order:
 
 Later layers SHOULD override earlier layers.
 
-### 6.3 Workspace initialization
+### 6.3 Workspace metadata document
+
+- Workspace metadata SHOULD be durably persisted as a document stored at:
+  - `/state/workspace.json`
+
+Required fields:
+
+- `path`
+- `mount`
+- `workspace_kind`
+- `created_at`
+- `updated_at`
+- `status`
+- `session_state`
+- `entrypoint`
+- `bundle_manifest`
+- `logs_dir`
+- `output_dir`
+- `scratch_dir`
+- `project_dir`
+- `input_dir`
+
+Optional fields MAY include:
+
+- `owner_id`
+- `source_id`
+- `work_item_id`
+- `task_id`
+- `bundle_id`
+- `tags`
+
+### 6.4 Workspace initialization
 
 When initializing a fresh mount:
 
 - required workspace directories MUST be created durably
 - the session-state parent directory MUST exist durably
+- the workspace-metadata parent directory MUST exist durably
 - the initial session-state document MUST be durably written
+- the initial workspace-metadata document SHOULD be durably written
 - if a bundle id is known at initialization time, it MUST be persisted into the
   initial session state
+- if a workspace kind is known at initialization time, it SHOULD be persisted
+  into the initial workspace metadata
+
+### 6.5 Workspace lifecycle helpers
+
+Implementations SHOULD expose explicit workspace lifecycle helpers.
+
+Recommended operations:
+
+- `workspaceExists(mount)`
+  - returns `true` iff the mount contains a durable initialized workspace
+- `workspaceShow(mount)`
+  - returns workspace config plus durable metadata/session state when present
+- `deleteWorkspace(mount)`
+  - durably removes workspace state from the mount namespace
+- `archiveWorkspace(mount)`
+  - durably marks workspace metadata as archived
 
 ---
 
@@ -556,6 +631,13 @@ Semantics:
 
 - returns `true` iff `stat(path)` is non-null
 
+Note:
+
+- `exists(path)` is a path-level existence probe.
+- workspace-level existence such as `workspaceExists(mount)` is a distinct
+  lifecycle concern and MUST NOT be conflated with arbitrary namespace
+  existence.
+
 ### 8.14 `readdir(path)` / `readdirWithFileTypes(path)`
 
 Purpose:
@@ -661,6 +743,58 @@ Atomicity:
 - partial-commit behavior is possible because move is implemented as multiple
   durable operations
 
+### 8.21 `replaceTextInFile(path, options)`
+
+Purpose:
+
+- perform a durable whole-file text replacement against a text file
+
+Semantics:
+
+- the target MUST exist
+- the target MUST be a text file
+- replacement matching MUST occur against the current durable file contents
+- if uniqueness is required, zero matches or multiple matches MUST fail
+- the resulting file MUST be durably rewritten as a whole-file update
+
+Output SHOULD include:
+
+- `path`
+- `matches`
+- before/after content hashes
+- optional change metadata such as before/after text preview
+
+### 8.22 `hydrateWorkspace(mount, localRoot, options)` / `syncWorkspace(mount, localRoot, manifest)`
+
+Purpose:
+
+- materialize a durable TPFS workspace into a disposable local execution mirror
+- reconcile local mutations back into TPFS
+
+Hydration semantics:
+
+- hydration MUST enumerate durable rows under the selected root
+- hydration MUST materialize directories locally
+- hydration MUST materialize text and binary files faithfully
+- hydration MUST return a manifest or snapshot describing the hydrated state
+
+Sync semantics:
+
+- sync MUST compare the local tree against the hydration snapshot
+- sync MUST detect created, modified, deleted, and unchanged paths
+- sync SHOULD skip unchanged paths
+- sync MUST detect remote changes to touched paths since hydration
+- if conflicts are detected, the implementation MUST surface them explicitly
+- binary files MUST round-trip byte-for-byte
+
+Concurrency model:
+
+- implementations MAY choose a conflict-reporting return value or a failing
+  operation for concurrent mutation
+- implementations MUST document which behavior they choose
+- implementations MUST NOT silently claim conflict-free synchronization when a
+  touched remote path changed since hydration
+
 ---
 
 ## 9. Runtime execution model
@@ -728,6 +862,9 @@ Implementations MAY special-case shell commands such as:
 If special-cased:
 
 - their persistent effects MUST still obey this specification
+- `cd` MUST fail when the resolved target is missing
+- `cd` MUST fail when the resolved target is not a directory
+- a failing `cd` MUST NOT persist an invalid cwd
 
 ### 10.5 Post-command cwd
 
@@ -799,6 +936,10 @@ The following operations are partial or constrained:
   - recursive subtree copy is non-atomic
 - `mv`
   - implemented as copy+delete rather than atomic rename
+- `syncWorkspace`
+  - conflict detection is path-scoped to touched entries since hydration
+  - returned conflict reports are explicit and local sandboxes remain
+    disposable execution mirrors rather than durable truth
 
 ### 12.3 Required unsupported-operation behavior
 

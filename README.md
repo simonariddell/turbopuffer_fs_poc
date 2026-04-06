@@ -58,11 +58,35 @@ That means:
 
 - workspace files live in turbopuffer-backed docs
 - session state lives in `/state/session.json`
+- workspace metadata lives in `/state/workspace.json`
 - command logs live in `/logs/run.jsonl`
 - bundle/task artifacts live in the same durable namespace
 
 If a machine dies, another machine should be able to recover from turbopuffer
 alone.
+
+## Content model and size semantics
+
+TPFS uses a deliberately simple whole-object content model:
+
+- text files are stored in full in `text`
+- binary files are stored in full in `blob_b64`
+- writes are whole-file overwrites, not random-write patches
+- append is implemented as durable read/modify/write
+- hydration/sync also operates on whole-file content
+
+Text vs binary behavior is intentionally predictable:
+
+- text and binary classification is inferred from bytes, file extension, and
+  MIME heuristics
+- callers may also provide an explicit MIME override for writes
+- binary files round-trip as bytes
+- text reads fail explicitly on binary targets
+
+TPFS does not currently advertise chunked-write or random-write semantics.
+Likewise, the current contract does not define a universal hard file-size cap.
+If a deployment introduces size limits, TPFS should fail explicitly rather than
+silently truncating content.
 
 ## Installation
 
@@ -91,6 +115,9 @@ The core package exports:
 - finalizers
 - live wrappers
 - workspace/session helpers
+- workspace metadata/lifecycle helpers
+- edit helpers
+- hydration/sync helpers
 - ingest helpers
 - bundle helpers
 - dogfood harness
@@ -112,6 +139,11 @@ import {
   putText,
   readText,
   workspaceInit,
+  workspaceShow,
+  workspaceExists,
+  replaceTextInFile,
+  hydrateWorkspace,
+  syncWorkspace,
   loadSessionState,
 } from "@workspace/turbopuffer-fs";
 ```
@@ -211,11 +243,23 @@ Durable session state such as `pwd` / `cd` lives in the configured session-state
 document, so an agent can restart on another node and continue from durable
 state.
 
+Workspace identity is also first-class. By default, TPFS persists workspace
+metadata to `/state/workspace.json`, including workspace kind, creation/update
+timestamps, lifecycle status, and canonical workspace paths. This lets higher
+level agent runtimes distinguish:
+
+- a mount that has never been initialized
+- an active durable workspace
+- an archived workspace
+
 CLI examples:
 
 ```bash
 pnpm exec tpfs workspace-init documents
+pnpm exec tpfs workspace-exists documents
 pnpm exec tpfs workspace-show documents
+pnpm exec tpfs workspace-archive documents
+pnpm exec tpfs workspace-delete documents
 pnpm exec tpfs cd documents /project
 pnpm exec tpfs pwd documents
 pnpm exec tpfs ls documents
@@ -224,6 +268,56 @@ pnpm exec tpfs cat documents src/file.ts
 
 Task bundles can override parts of the workspace profile via a `workspace`
 section in `bundle.json`.
+
+## Agent-safe editing
+
+TPFS now includes a small text-edit helper for deterministic read/edit/write
+loops:
+
+```ts
+import { replaceTextInFile } from "@workspace/turbopuffer-fs";
+
+await replaceTextInFile(client, "documents", "/project/notes.txt", {
+  search: "world",
+  replace: "tpfs",
+});
+```
+
+The helper:
+
+- reads through TPFS
+- requires a text file
+- fails explicitly on zero matches or ambiguous multi-match replacements
+- rewrites the file durably through TPFS
+- returns simple change metadata including match count and before/after hashes
+
+## Hydration and sync
+
+TPFS also exposes an explicit hydration/sync workflow for agent runtimes that
+need a disposable local execution mirror:
+
+```ts
+import { hydrateWorkspace, syncWorkspace } from "@workspace/turbopuffer-fs";
+
+const manifest = await hydrateWorkspace(client, "documents", "/tmp/tpfs-sandbox", {
+  workspaceConfig,
+});
+
+// ...run tools locally inside /tmp/tpfs-sandbox...
+
+const result = await syncWorkspace(client, "documents", "/tmp/tpfs-sandbox", manifest);
+```
+
+Current sync semantics are intentionally simple and conservative:
+
+- hydrate produces a snapshot manifest
+- sync detects created, modified, deleted, and unchanged paths
+- sync skips unchanged paths
+- sync reports conflicts when a touched remote path changed after hydration
+- binary files round-trip as bytes
+
+Local sandboxes are execution mirrors only; TPFS remains the durable source of
+truth.
 
 ## Dogfood harness
 

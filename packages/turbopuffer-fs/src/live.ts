@@ -17,6 +17,7 @@ import {
 } from "./plans.js";
 import { run } from "./runtime.js";
 export { ingestDirectory } from "./ingest.js";
+export { hydrateWorkspace, syncWorkspace } from "./hydration.js";
 import type { GrepOptions } from "./types.js";
 
 export const MOUNT_SUFFIX = "__fs";
@@ -63,6 +64,10 @@ export async function runPlan(client: Turbopuffer, plan: import("./types.js").Pl
 
 export function stat(client: Turbopuffer, mount: string, path: string) {
   return runPlan(client, statPlan(mountNamespace(mount), path));
+}
+
+export async function exists(client: Turbopuffer, mount: string, path: string): Promise<boolean> {
+  return (await stat(client, mount, path)) !== null;
 }
 
 export function ls(client: Turbopuffer, mount: string, path = "/", limit?: number) {
@@ -163,4 +168,12 @@ export function putBytes(
 
 export function rm(client: Turbopuffer, mount: string, path: string, recursive = false) {
   return runPlan(client, rmPlan(mountNamespace(mount), path, recursive));
+}
+
+export { replaceTextInFile } from "./edit.js";
+
+export async function deleteMount(client: Turbopuffer, mount: string): Promise<{ mount: string; namespace: string; deleted: true }> {
+  const namespace = mountNamespace(mount);
+  await client.namespace(namespace).deleteAll();
+  return { mount, namespace, deleted: true };
 }
