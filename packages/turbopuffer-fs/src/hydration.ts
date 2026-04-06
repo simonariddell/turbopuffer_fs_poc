@@ -76,10 +76,11 @@ async function scanLocalRecursive(root: string, localPath: string, rows: Hydrati
   const relative = localPath.slice(root.length).replace(/^\/+/, "");
   const mountPath = normalizePath(relative === "" ? "/" : `/${relative}`);
   if (stats.isDirectory()) {
+    const directorySha = directoryRow(mountPath).sha256;
     rows.push({
       path: mountPath,
       kind: "dir",
-      sha256: directoryRow(mountPath).sha256,
+      sha256: typeof directorySha === "string" ? directorySha : undefined,
       size_bytes: 0,
       is_text: 0,
     });

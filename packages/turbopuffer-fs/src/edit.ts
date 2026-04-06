@@ -55,11 +55,11 @@ export async function replaceTextInFile(
   options: ReplaceTextInFileOptions,
 ): Promise<ReplaceTextInFileResult> {
   const normalizedPath = normalizePath(path);
-  const target = await stat(client, mount, normalizedPath);
+  const target = (await stat(client, mount, normalizedPath)) as Record<string, unknown> | null;
   if (target === null) {
     throw new Error(`FileNotFoundError:${normalizedPath}`);
   }
-  if (target.kind === "dir") {
+  if (String(target.kind) === "dir") {
     throw new Error(`IsADirectoryError:${normalizedPath}`);
   }
   if (Number(target.is_text ?? 0) !== 1) {

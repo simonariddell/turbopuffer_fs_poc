@@ -14,4 +14,4 @@ export * from "./hydration.js";
 export * from "./ingest.js";
 export * from "./bundles.js";
 export * from "./dogfood.js";
-export * from "./cli.js";
+export { runCli, main, defaultCliIO, type CliIO } from "./cli.js";

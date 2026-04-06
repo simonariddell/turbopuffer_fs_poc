@@ -364,11 +364,11 @@ export async function workspaceCd(
 ): Promise<{ cwd: string; mount: string }> {
   const session = await loadSessionState(client, mount, options);
   const resolved = resolveCliPath(targetPath, { cwd: String(session.cwd) });
-  const target = await stat(client, mount, resolved);
+  const target = (await stat(client, mount, resolved)) as Record<string, unknown> | null;
   if (target === null) {
     throw new Error(`FileNotFoundError:${resolved}`);
   }
-  if (target.kind !== "dir") {
+  if (String(target.kind) !== "dir") {
     throw new Error(`NotADirectoryError:${resolved}`);
   }
   const saved = await saveSessionState(
