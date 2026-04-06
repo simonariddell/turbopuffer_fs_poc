@@ -136,11 +136,17 @@ export class FakeNamespace {
     options: {
       queryResponses?: Array<unknown | QueryResponseFactory>;
       writeResponses?: Array<unknown | WriteResponseFactory>;
+      initialRows?: AnyObject[];
     } = {},
   ) {
     this.name = name;
     this.queryResponses = [...(options.queryResponses ?? [])];
     this.writeResponses = [...(options.writeResponses ?? [])];
+    for (const row of options.initialRows ?? []) {
+      if (row.path !== undefined) {
+        this.rows.set(String(row.path), { ...row });
+      }
+    }
   }
 
   async query(payload: AnyObject): Promise<unknown> {
@@ -208,7 +214,12 @@ export class FakeNamespace {
   }
 
   async deleteAll(): Promise<void> {
+    this.rows.clear();
     return undefined;
+  }
+
+  snapshotRows(): AnyObject[] {
+    return [...this.rows.values()].map((row) => ({ ...row }));
   }
 }
 

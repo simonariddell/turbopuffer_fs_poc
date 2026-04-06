@@ -17,6 +17,7 @@ import {
 } from "./plans.js";
 import { run } from "./runtime.js";
 export { ingestDirectory } from "./ingest.js";
+export { hydrateWorkspace, syncWorkspace } from "./hydration.js";
 import type { GrepOptions } from "./types.js";
 
 export const MOUNT_SUFFIX = "__fs";
