@@ -97,6 +97,7 @@ describe("cli", () => {
       updated_at: "2026-04-05T00:00:01.000Z",
       path: "/state/session.json",
     });
+    vi.spyOn(live, "stat").mockResolvedValue({ path: "/output", kind: "dir" } as never);
 
     const pwdIo = createIo();
     expect(await runCli(["pwd", "documents"], pwdIo.io)).toBe(0);
@@ -105,6 +106,83 @@ describe("cli", () => {
     const cdIo = createIo();
     expect(await runCli(["cd", "documents", "../output"], cdIo.io)).toBe(0);
     expect(JSON.parse(cdIo.stdout.join(""))).toEqual({ cwd: "/output", mount: "documents" });
+  });
+
+  it("supports workspace show and existence commands", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({} as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "workspaceShow").mockResolvedValue({
+      exists: true,
+      workspace: workspace.defaultWorkspaceConfig(),
+      metadata: {
+        path: "/state/workspace.json",
+        mount: "documents",
+        workspace_kind: "task",
+        created_at: "2026-04-05T00:00:00.000Z",
+        updated_at: "2026-04-05T00:00:00.000Z",
+        status: "active",
+        session_state: "/state/session.json",
+        entrypoint: "/TASK.md",
+        bundle_manifest: "/bundle.json",
+        logs_dir: "/logs",
+        output_dir: "/output",
+        scratch_dir: "/scratch",
+        project_dir: "/project",
+        input_dir: "/input",
+      },
+      session: {
+        cwd: "/project",
+        mount: "documents",
+        updated_at: "2026-04-05T00:00:00.000Z",
+        path: "/state/session.json",
+      },
+    } as never);
+    vi.spyOn(workspace, "workspaceExists").mockResolvedValue(true);
+
+    const showIo = createIo();
+    expect(await runCli(["workspace-show", "documents"], showIo.io)).toBe(0);
+    expect(JSON.parse(showIo.stdout.join(""))).toMatchObject({
+      exists: true,
+      metadata: {
+        workspace_kind: "task",
+      },
+    });
+
+    const existsIo = createIo();
+    expect(await runCli(["workspace-exists", "documents"], existsIo.io)).toBe(0);
+    expect(JSON.parse(existsIo.stdout.join(""))).toEqual({ mount: "documents", exists: true });
+  });
+
+  it("supports workspace delete and archive commands", async () => {
+    vi.spyOn(live, "makeClient").mockReturnValue({
+      namespace: vi.fn(() => ({ deleteAll: vi.fn(async () => undefined) })),
+    } as never);
+    vi.spyOn(workspace, "resolveWorkspaceConfig").mockReturnValue(workspace.defaultWorkspaceConfig());
+    vi.spyOn(workspace, "archiveWorkspace").mockResolvedValue({
+      mount: "documents",
+      namespace: "documents__fs",
+      archived: true,
+      metadata: {
+        status: "archived",
+      },
+    } as never);
+
+    const deleteIo = createIo();
+    expect(await runCli(["workspace-delete", "documents"], deleteIo.io)).toBe(0);
+    expect(JSON.parse(deleteIo.stdout.join(""))).toEqual({
+      mount: "documents",
+      namespace: "documents__fs",
+      deleted: true,
+    });
+
+    const archiveIo = createIo();
+    expect(await runCli(["workspace-archive", "documents"], archiveIo.io)).toBe(0);
+    expect(JSON.parse(archiveIo.stdout.join(""))).toMatchObject({
+      archived: true,
+      metadata: {
+        status: "archived",
+      },
+    });
   });
 
   it("supports put-text from stdin and put-bytes from stdin", async () => {

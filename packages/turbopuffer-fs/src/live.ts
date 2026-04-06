@@ -65,6 +65,10 @@ export function stat(client: Turbopuffer, mount: string, path: string) {
   return runPlan(client, statPlan(mountNamespace(mount), path));
 }
 
+export async function exists(client: Turbopuffer, mount: string, path: string): Promise<boolean> {
+  return (await stat(client, mount, path)) !== null;
+}
+
 export function ls(client: Turbopuffer, mount: string, path = "/", limit?: number) {
   return runPlan(client, lsPlan(mountNamespace(mount), path, limit));
 }
@@ -163,4 +167,10 @@ export function putBytes(
 
 export function rm(client: Turbopuffer, mount: string, path: string, recursive = false) {
   return runPlan(client, rmPlan(mountNamespace(mount), path, recursive));
+}
+
+export async function deleteMount(client: Turbopuffer, mount: string): Promise<{ mount: string; namespace: string; deleted: true }> {
+  const namespace = mountNamespace(mount);
+  await client.namespace(namespace).deleteAll();
+  return { mount, namespace, deleted: true };
 }

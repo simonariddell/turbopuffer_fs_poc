@@ -12,6 +12,7 @@ import {
 import { runDogfood } from "./dogfood.js";
 import {
   cat,
+  exists,
   find,
   grep,
   ingestDirectory,
@@ -28,11 +29,15 @@ import {
   stat,
 } from "./live.js";
 import {
+  archiveWorkspace as archiveWorkspaceCore,
   loadSessionState,
-  resolveCliPath,
   resolveWorkspaceConfig,
-  saveSessionState,
+  resolveCliPath,
+  workspaceExists as workspaceExistsCore,
   workspaceInit,
+  workspaceShow as workspaceShowCore,
+  saveSessionState,
+  deleteWorkspace as deleteWorkspaceCore,
 } from "./workspace.js";
 
 export interface CliIO {
@@ -171,10 +176,15 @@ export async function workspaceShow(
   mount: string,
   workspaceConfig: ReturnType<typeof resolveWorkspaceConfig>,
 ) {
-  return {
-    workspace: workspaceConfig,
-    session: await loadSessionState(client, mount, { workspaceConfig }),
-  };
+  return workspaceShowCore(client, mount, { workspaceConfig });
+}
+
+export async function workspaceExists(
+  client: ReturnType<typeof makeClient>,
+  mount: string,
+  workspaceConfig: ReturnType<typeof resolveWorkspaceConfig>,
+) {
+  return { mount, exists: await workspaceExistsCore(client, mount, { workspaceConfig }) };
 }
 
 export async function workspacePwd(
@@ -194,6 +204,13 @@ export async function workspaceCd(
 ) {
   const cwd = await workspacePwd(client, mount, workspaceConfig);
   const resolved = resolveCliPath(targetPath, { cwd });
+  const target = await stat(client, mount, resolved);
+  if (target === null) {
+    throw new Error(`FileNotFoundError:${resolved}`);
+  }
+  if (target.kind !== "dir") {
+    throw new Error(`NotADirectoryError:${resolved}`);
+  }
   const saved = await saveSessionState(
     client,
     mount,
@@ -204,6 +221,21 @@ export async function workspaceCd(
     cwd: saved.cwd,
     mount,
   };
+}
+
+export async function workspaceDelete(
+  client: ReturnType<typeof makeClient> & { namespace(namespace: string): { deleteAll(): Promise<void> } },
+  mount: string,
+) {
+  return deleteWorkspaceCore(client, mount);
+}
+
+export async function workspaceArchive(
+  client: ReturnType<typeof makeClient>,
+  mount: string,
+  workspaceConfig: ReturnType<typeof resolveWorkspaceConfig>,
+) {
+  return archiveWorkspaceCore(client, mount, { workspaceConfig });
 }
 
 export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<number> {
@@ -233,9 +265,38 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
         result = await workspaceShow(client, mount, workspaceConfig);
         break;
       }
+      case "workspace-exists": {
+        const mount = parsed.positionals[0] ?? "documents";
+        result = await workspaceExists(client, mount, workspaceConfig);
+        break;
+      }
       case "workspace-init": {
         const mount = parsed.positionals[0] ?? "documents";
-        result = await workspaceInit(client, mount, { workspaceConfig });
+        result = await workspaceInit(client, mount, {
+          workspaceConfig,
+          workspaceKind: typeof parsed.flags.kind === "string" ? parsed.flags.kind : undefined,
+          bundleId: typeof parsed.flags["bundle-id"] === "string" ? parsed.flags["bundle-id"] : undefined,
+          ownerId: typeof parsed.flags["owner-id"] === "string" ? parsed.flags["owner-id"] : undefined,
+          sourceId: typeof parsed.flags["source-id"] === "string" ? parsed.flags["source-id"] : undefined,
+          workItemId: typeof parsed.flags["work-item-id"] === "string" ? parsed.flags["work-item-id"] : undefined,
+          taskId: typeof parsed.flags["task-id"] === "string" ? parsed.flags["task-id"] : undefined,
+          tags:
+            typeof parsed.flags.tag === "string"
+              ? String(parsed.flags.tag).split(",").map((tag) => tag.trim()).filter(Boolean)
+              : undefined,
+        });
+        break;
+      }
+      case "workspace-delete": {
+        const mount = parsed.positionals[0] ?? "documents";
+        result = await workspaceDelete(client as ReturnType<typeof makeClient> & {
+          namespace(namespace: string): { deleteAll(): Promise<void> };
+        }, mount);
+        break;
+      }
+      case "workspace-archive": {
+        const mount = parsed.positionals[0] ?? "documents";
+        result = await workspaceArchive(client, mount, workspaceConfig);
         break;
       }
       case "pwd": {
@@ -255,6 +316,14 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
         if (!mount || !path) throw new Error("stat requires <mount> <path>");
         const cwd = await workspacePwd(client, mount, workspaceConfig);
         result = await stat(client, mount, resolveCliPath(path, { cwd }));
+        break;
+      }
+      case "exists": {
+        const [mount, path] = parsed.positionals;
+        if (!mount || !path) throw new Error("exists requires <mount> <path>");
+        const cwd = await workspacePwd(client, mount, workspaceConfig);
+        const resolved = resolveCliPath(path, { cwd });
+        result = { path: resolved, exists: await exists(client, mount, resolved) };
         break;
       }
       case "ls": {
