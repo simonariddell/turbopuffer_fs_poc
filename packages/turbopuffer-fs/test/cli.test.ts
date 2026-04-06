@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as bundles from "../src/bundles.js";
 import * as dogfood from "../src/dogfood.js";
+import * as edit from "../src/edit.js";
 import * as hydration from "../src/hydration.js";
 import * as live from "../src/live.js";
 import * as workspace from "../src/workspace.js";
@@ -371,7 +372,7 @@ describe("cli", () => {
       path: "/state/session.json",
       bundle_id: "bundle-1",
     });
-    const replaceSpy = vi.spyOn(live, "replaceTextInFile").mockResolvedValue({
+    const replaceSpy = vi.spyOn(edit, "replaceTextInFile").mockResolvedValue({
       path: "/project/notes.txt",
       matches: 1,
       changed: true,
@@ -510,7 +511,7 @@ describe("cli", () => {
       updated_at: "2026-04-05T00:00:00.000Z",
       path: "/state/session.json",
     });
-    vi.spyOn(live, "replaceTextInFile").mockRejectedValue(
+    vi.spyOn(edit, "replaceTextInFile").mockRejectedValue(
       new Error("ReplaceTextNoMatchError:/project/notes.txt"),
     );
 

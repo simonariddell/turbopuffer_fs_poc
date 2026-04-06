@@ -24,6 +24,7 @@ import {
   putText,
   readBytes,
   readText,
+  replaceTextInFile,
   rm,
   search,
   stat,
@@ -40,7 +41,6 @@ import {
   deleteWorkspace as deleteWorkspaceCore,
   workspaceCd as workspaceCdCore,
 } from "./workspace.js";
-import { replaceTextInFile } from "./edit.js";
 import { cliErrorEnvelope, parseBooleanFlag } from "./cli-errors.js";
 
 export interface CliIO {
