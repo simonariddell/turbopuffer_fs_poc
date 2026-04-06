@@ -1,4 +1,4 @@
-import { readFile as readFileNode, writeFile as writeFileNode } from "node:fs/promises";
+import { mkdir as fsMkdir, readFile as readFileNode, writeFile as writeFileNode } from "node:fs/promises";
 
 import {
   bundleConfig,
@@ -28,17 +28,20 @@ import {
   search,
   stat,
 } from "./live.js";
+import { hydrateWorkspace, syncWorkspace, type HydrationManifest } from "./hydration.js";
 import {
   archiveWorkspace as archiveWorkspaceCore,
   loadSessionState,
-  resolveWorkspaceConfig,
   resolveCliPath,
+  resolveWorkspaceConfig,
   workspaceExists as workspaceExistsCore,
   workspaceInit,
   workspaceShow as workspaceShowCore,
-  saveSessionState,
   deleteWorkspace as deleteWorkspaceCore,
+  workspaceCd as workspaceCdCore,
 } from "./workspace.js";
+import { replaceTextInFile } from "./edit.js";
+import { cliErrorEnvelope, parseBooleanFlag } from "./cli-errors.js";
 
 export interface CliIO {
   stdout(text: string): void;
@@ -171,6 +174,17 @@ async function loadBytesInput(parsed: ParsedArgs, io: CliIO): Promise<Uint8Array
   throw new Error("expected one of --file or --stdin");
 }
 
+async function writeManifestFile(path: string, manifest: unknown): Promise<void> {
+  const normalizedPath = path.trim();
+  if (normalizedPath.length === 0) {
+    throw new Error("manifest output path must not be empty");
+  }
+  const lastSlash = Math.max(normalizedPath.lastIndexOf("/"), normalizedPath.lastIndexOf("\\"));
+  const parent = lastSlash > 0 ? normalizedPath.slice(0, lastSlash) : ".";
+  await fsMkdir(parent, { recursive: true });
+  await writeFileNode(normalizedPath, jsonDump(manifest), "utf8");
+}
+
 export async function workspaceShow(
   client: ReturnType<typeof makeClient>,
   mount: string,
@@ -202,25 +216,7 @@ export async function workspaceCd(
   targetPath: string,
   workspaceConfig: ReturnType<typeof resolveWorkspaceConfig>,
 ) {
-  const cwd = await workspacePwd(client, mount, workspaceConfig);
-  const resolved = resolveCliPath(targetPath, { cwd });
-  const target = (await stat(client, mount, resolved)) as Record<string, unknown> | null;
-  if (target === null) {
-    throw new Error(`FileNotFoundError:${resolved}`);
-  }
-  if (String(target.kind) !== "dir") {
-    throw new Error(`NotADirectoryError:${resolved}`);
-  }
-  const saved = await saveSessionState(
-    client,
-    mount,
-    { cwd: resolved, mount },
-    { workspaceConfig },
-  );
-  return {
-    cwd: saved.cwd,
-    mount,
-  };
+  return workspaceCdCore(client, mount, targetPath, { workspaceConfig });
 }
 
 export async function workspaceDelete(
@@ -243,7 +239,13 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
   try {
     parsed = parseArgs(argv);
   } catch (error) {
-    io.stderr(jsonDump({ error: "ParseError", message: String((error as Error).message) }));
+    io.stderr(
+      jsonDump(
+        cliErrorEnvelope(error, {
+          defaultCode: "ParseError",
+        }),
+      ),
+    );
     return 2;
   }
 
@@ -284,6 +286,57 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
             typeof parsed.flags.tag === "string"
               ? String(parsed.flags.tag).split(",").map((tag) => tag.trim()).filter(Boolean)
               : undefined,
+        });
+        break;
+      }
+      case "replace-text": {
+        const [mount, path] = parsed.positionals;
+        if (!mount || !path) throw new Error("replace-text requires <mount> <path>");
+        const search = typeof parsed.flags.search === "string" ? parsed.flags.search : undefined;
+        const replace = typeof parsed.flags.replace === "string" ? parsed.flags.replace : undefined;
+        if (search === undefined) throw new Error("replace-text requires --search");
+        if (replace === undefined) throw new Error("replace-text requires --replace");
+        const cwd = await workspacePwd(client, mount, workspaceConfig);
+        result = await replaceTextInFile(client, mount, resolveCliPath(path, { cwd }), {
+          search: parseBooleanFlag(parsed.flags.regex)
+            ? new RegExp(search)
+            : search,
+          replace,
+          expectedMatches:
+            typeof parsed.flags["expected-matches"] === "string"
+              ? Number(parsed.flags["expected-matches"])
+              : undefined,
+          requireUnique: !parseBooleanFlag(parsed.flags["allow-multiple"]),
+          ignoreCase: parseBooleanFlag(parsed.flags["ignore-case"]),
+        });
+        break;
+      }
+      case "hydrate": {
+        const [mount, localRoot] = parsed.positionals;
+        if (!mount || !localRoot) throw new Error("hydrate requires <mount> <local-root>");
+        result = await hydrateWorkspace(client, mount, localRoot, {
+          workspaceConfig,
+          root: typeof parsed.flags.root === "string" ? parsed.flags.root : undefined,
+        });
+        if (typeof parsed.flags["manifest-out"] === "string") {
+          await writeManifestFile(parsed.flags["manifest-out"], result);
+          result = {
+            ...(result as Record<string, unknown>),
+            manifest_file: parsed.flags["manifest-out"],
+          };
+        }
+        break;
+      }
+      case "sync": {
+        const [mount, localRoot] = parsed.positionals;
+        if (!mount || !localRoot) throw new Error("sync requires <mount> <local-root>");
+        const manifestPath = typeof parsed.flags["manifest-file"] === "string"
+          ? parsed.flags["manifest-file"]
+          : undefined;
+        if (!manifestPath) throw new Error("sync requires --manifest-file");
+        const manifest = JSON.parse(await readFileNode(manifestPath, "utf8")) as HydrationManifest;
+        result = await syncWorkspace(client, mount, localRoot, manifest, {
+          workspaceConfig,
         });
         break;
       }
@@ -497,7 +550,7 @@ export async function runCli(argv: string[], io: CliIO = defaultCliIO): Promise<
     io.stdout(jsonDump(result));
     return 0;
   } catch (error) {
-    io.stderr(jsonDump({ error: (error as Error).name, message: String((error as Error).message) }));
+    io.stderr(jsonDump(cliErrorEnvelope(error as Error)));
     return 1;
   }
 }

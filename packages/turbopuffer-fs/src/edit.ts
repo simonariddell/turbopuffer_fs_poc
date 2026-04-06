@@ -63,7 +63,7 @@ export async function replaceTextInFile(
     throw new Error(`IsADirectoryError:${normalizedPath}`);
   }
   if (Number(target.is_text ?? 0) !== 1) {
-    throw new Error(`ValueError:path is a binary file: ${normalizedPath}`);
+    throw new Error(`NonTextFileError:${normalizedPath}`);
   }
 
   const before = String(await readText(client, mount, normalizedPath));

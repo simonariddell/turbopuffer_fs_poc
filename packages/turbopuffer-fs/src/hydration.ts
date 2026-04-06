@@ -1,9 +1,27 @@
-import { mkdir as fsMkdir, readdir as fsReaddir, readFile as fsReadFile, rm as fsRm, stat as fsStat, writeFile as fsWriteFile } from "node:fs/promises";
+import {
+  mkdir as fsMkdir,
+  readdir as fsReaddir,
+  readFile as fsReadFile,
+  rm as fsRm,
+  stat as fsStat,
+  writeFile as fsWriteFile,
+} from "node:fs/promises";
 import { dirname, join, resolve as resolvePath } from "node:path";
 
 import { directoryRow, rowFromBytes } from "./schema.js";
 import { normalizePath } from "./paths.js";
-import { find, loadSessionState, mkdir, putBytes, putText, readBytes, readText, rm, stat, type WorkspaceConfig } from "./index.js";
+import {
+  find,
+  loadSessionState,
+  mkdir,
+  putBytes,
+  putText,
+  readBytes,
+  readText,
+  rm,
+  stat,
+  type WorkspaceConfig,
+} from "./index.js";
 import type { AnyObject } from "./types.js";
 
 export interface HydrationEntry extends AnyObject {
@@ -22,6 +40,7 @@ export interface HydrationManifest extends AnyObject {
   cwd: string;
   workspace_metadata_path: string;
   entries: Record<string, HydrationEntry>;
+  snapshot: Record<string, HydrationEntry>;
 }
 
 export interface SyncConflict extends AnyObject {
@@ -126,7 +145,7 @@ export async function hydrateWorkspace(
   client: Parameters<typeof stat>[0],
   mount: string,
   localRoot: string,
-  options: { workspaceConfig: WorkspaceConfig } & { root?: string | null } ,
+  options: { workspaceConfig: WorkspaceConfig } & { root?: string | null },
 ): Promise<HydrationManifest> {
   const root = normalizePath(options.root ?? "/");
   await fsMkdir(localRoot, { recursive: true });
@@ -150,6 +169,7 @@ export async function hydrateWorkspace(
     cwd: String(session.cwd),
     workspace_metadata_path: "/state/workspace.json",
     entries: entriesRecord(entries),
+    snapshot: entriesRecord(entries),
   };
 }
 
@@ -172,7 +192,7 @@ export async function syncWorkspace(
   const localEntries: HydrationEntry[] = [];
   await scanLocalRecursive(resolvePath(localRoot), resolvePath(localRoot), localEntries);
 
-  const snapshotEntries = Object.values(manifest.entries);
+  const snapshotEntries = Object.values(manifest.snapshot ?? manifest.entries);
   const snapshotMap = mapEntries(snapshotEntries);
   const currentMap = mapEntries(currentEntries);
   const localMap = mapEntries(localEntries);
