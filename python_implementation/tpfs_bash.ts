@@ -373,15 +373,29 @@ class TpfsPyFs implements IFileSystem {
     this.removePath(path, options?.recursive ?? false);
   }
 
-  async cp(src: string, dest: string, _options?: CpOptions): Promise<void> {
-    this.call(["cp", src, dest]);
-    this.addPath(dest);
+  async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
+    const args = ["cp", src, dest];
+    if (options?.recursive) args.push("-r");
+    const result = this.call(args) as Record<string, unknown> | null;
+    // Update cache from result payload, not input args
+    const actualPath = result?.path ?? dest;
+    this.addPath(String(actualPath));
+    // For recursive ops, refresh entire cache
+    if (options?.recursive) {
+      this.refreshPaths();
+    }
   }
 
   async mv(src: string, dest: string): Promise<void> {
-    this.call(["mv", src, dest]);
-    this.removePath(src, false);
-    this.addPath(dest);
+    const result = this.call(["mv", src, dest]) as Record<string, unknown> | null;
+    const actualPath = result?.path ?? dest;
+    // Check if source was a directory (recursive move)
+    const isRecursive = result && "files_copied" in result;
+    this.removePath(src, !!isRecursive);
+    this.addPath(String(actualPath));
+    if (isRecursive) {
+      this.refreshPaths();
+    }
   }
 
   // ── Path operations ─────────────────────────────────────────────────────

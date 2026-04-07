@@ -1138,25 +1138,33 @@ class TpFS:
             self._delete_ids(ids)
         return {"path": norm, "deleted": True, "count": len(ids)}
 
-    def cp(self, src: str, dst: str) -> dict[str, Any]:
-        """Copy a file to a new path.
+    def cp(
+        self, src: str, dst: str, *, recursive: bool = False,
+    ) -> dict[str, Any]:
+        """Copy a file or directory to a new path.
 
         If *dst* is an existing directory, copies into it with the
-        source basename.
+        source basename.  Directory copies require ``recursive=True``.
         """
         src_n = normalize_path(src)
         dst_n = normalize_path(dst)
         src_row = self._query_one(src_n, CONTENT_FIELDS)
         if src_row is None:
             raise FileNotFoundError(src_n)
-        if src_row.get("kind") == "dir":
-            raise IsADirectoryError(f"cp does not support directories: {src_n}")
 
         # If dst is an existing directory, copy into it
         dst_stat = self.stat(dst_n)
         if dst_stat and dst_stat.get("kind") == "dir":
             dst_n = normalize_path(f"{dst_n.rstrip('/')}/{path_basename(src_n)}")
 
+        if src_row.get("kind") == "dir":
+            if not recursive:
+                raise IsADirectoryError(
+                    f"cp requires -r/--recursive for directories: {src_n}"
+                )
+            return self._cp_recursive(src_n, dst_n)
+
+        # File copy
         if src_row.get("is_text"):
             return self.put_text(dst_n, str(src_row.get("text", "")),
                                  str(src_row.get("mime")) if src_row.get("mime") else None)
@@ -1164,10 +1172,129 @@ class TpFS:
         return self.put_bytes(dst_n, data,
                               str(src_row.get("mime")) if src_row.get("mime") else None)
 
+    def _cp_recursive(
+        self, src: str, dst: str,
+    ) -> dict[str, Any]:
+        """Recursively copy a directory subtree.
+
+        Rejects copies into own descendant.  Uses a single batched
+        upsert when the subtree fits in one request (≤256 rows).
+        For larger subtrees, raises an explicit error in this pass.
+        """
+        src_n = normalize_path(src)
+        dst_n = normalize_path(dst)
+
+        # Reject copy into own descendant
+        if dst_n == src_n or dst_n.startswith(src_n.rstrip("/") + "/"):
+            raise ValueError(
+                f"cannot copy directory into itself or its own descendant: "
+                f"{src_n} → {dst_n}"
+            )
+
+        # Enumerate source subtree
+        entries = self.find(src_n)
+        if not entries:
+            raise FileNotFoundError(src_n)
+
+        max_batch = 256
+        if len(entries) > max_batch:
+            raise ValueError(
+                f"subtree too large for single-batch recursive cp "
+                f"({len(entries)} entries, limit {max_batch}). "
+                f"Not yet supported for large trees."
+            )
+
+        # Build destination rows with remapped paths
+        rows: list[dict[str, Any]] = []
+        src_prefix = src_n.rstrip("/")
+        dst_prefix = dst_n.rstrip("/")
+
+        for entry in entries:
+            entry_path = str(entry["path"])
+            # Remap path: src_prefix → dst_prefix
+            if entry_path == src_n:
+                new_path = dst_n
+            else:
+                suffix = entry_path[len(src_prefix):]
+                new_path = normalize_path(f"{dst_prefix}{suffix}")
+
+            if entry.get("kind") == "dir":
+                rows.append(directory_row(new_path))
+            else:
+                # Need to fetch content for files
+                content_row = self._query_one(entry_path, CONTENT_FIELDS)
+                if content_row is None:
+                    continue
+                mime = str(content_row.get("mime")) if content_row.get("mime") else None
+                if content_row.get("is_text"):
+                    rows.append(text_row(
+                        new_path,
+                        str(content_row.get("text", "")),
+                        mime=mime,
+                        version=1,
+                    ))
+                else:
+                    data = base64.b64decode(content_row.get("blob_b64", ""))
+                    rows.append(bytes_row(new_path, data, mime=mime, version=1))
+
+        # Add parent directories for the destination root
+        rows = parent_directory_rows(dst_n) + rows
+
+        # Deduplicate by id (parents may overlap)
+        seen_ids: set[str] = set()
+        unique_rows: list[dict[str, Any]] = []
+        for row in rows:
+            rid = str(row.get("id", ""))
+            if rid not in seen_ids:
+                seen_ids.add(rid)
+                unique_rows.append(row)
+
+        self._upsert(unique_rows)
+
+        n_files = sum(1 for e in entries if e.get("kind") == "file")
+        n_dirs = sum(1 for e in entries if e.get("kind") == "dir")
+        return {
+            "path": dst_n,
+            "source": src_n,
+            "files_copied": n_files,
+            "dirs_copied": n_dirs,
+            "total_docs": len(unique_rows),
+        }
+
     def mv(self, src: str, dst: str) -> dict[str, Any]:
-        """Move a file (copy + delete source)."""
-        result = self.cp(src, dst)
-        self.rm(src)
+        """Move a file or directory (copy + delete source).
+
+        Rejects moves into own descendant for directories.
+        """
+        src_n = normalize_path(src)
+        dst_n = normalize_path(dst)
+
+        if src_n == "/":
+            raise ValueError("cannot move root")
+
+        src_stat = self.stat(src_n)
+        if src_stat is None:
+            raise FileNotFoundError(src_n)
+
+        # If dst is an existing directory, move into it
+        dst_stat = self.stat(dst_n)
+        if dst_stat and dst_stat.get("kind") == "dir":
+            dst_n = normalize_path(f"{dst_n.rstrip('/')}/{path_basename(src_n)}")
+
+        if src_stat.get("kind") == "dir":
+            # Reject move into own descendant
+            if dst_n == src_n or dst_n.startswith(src_n.rstrip("/") + "/"):
+                raise ValueError(
+                    f"cannot move directory into itself or its own descendant: "
+                    f"{src_n} → {dst_n}"
+                )
+            result = self._cp_recursive(src_n, dst_n)
+            self.rm(src_n, recursive=True)
+            return result
+
+        # File move
+        result = self.cp(src_n, dst_n)
+        self.rm(src_n)
         return result
 
     def touch(self, path: str) -> dict[str, Any]:
@@ -2422,17 +2549,25 @@ def rm(state: TpFSState, path: str, recursive: bool) -> None:
 @cli.command()
 @click.argument("src")
 @click.argument("dst")
+@click.option("-r", "--recursive", is_flag=True, help="Recursive copy for directories.")
 @pass_state
-def cp(state: TpFSState, src: str, dst: str) -> None:
-    """Copy a file."""
+def cp(state: TpFSState, src: str, dst: str, recursive: bool) -> None:
+    """Copy a file or directory (-r for directories)."""
     cwd = state.fs.pwd()
     src_r = resolve_path(src, cwd)
     dst_r = resolve_path(dst, cwd)
-    result = state.fs.cp(src_r, dst_r)
+    result = state.fs.cp(src_r, dst_r, recursive=recursive)
     if state.use_json:
         _json_out(result)
     else:
-        click.echo(click.style(f"✓ copied → {result['path']}", fg="green"))
+        target = result.get("path", dst_r)
+        if "files_copied" in result:
+            click.echo(click.style(
+                f"✓ copied {result['files_copied']} files, "
+                f"{result['dirs_copied']} dirs → {target}",
+                fg="green"))
+        else:
+            click.echo(click.style(f"✓ copied → {target}", fg="green"))
 
 
 # ── mv ───────────────────────────────────────────────────────────────────────
@@ -2442,7 +2577,7 @@ def cp(state: TpFSState, src: str, dst: str) -> None:
 @click.argument("dst")
 @pass_state
 def mv(state: TpFSState, src: str, dst: str) -> None:
-    """Move a file."""
+    """Move a file or directory."""
     cwd = state.fs.pwd()
     src_r = resolve_path(src, cwd)
     dst_r = resolve_path(dst, cwd)
@@ -2450,7 +2585,8 @@ def mv(state: TpFSState, src: str, dst: str) -> None:
     if state.use_json:
         _json_out(result)
     else:
-        click.echo(click.style(f"✓ moved → {result['path']}", fg="green"))
+        target = result.get("path", dst_r)
+        click.echo(click.style(f"✓ moved → {target}", fg="green"))
 
 
 # ── touch ────────────────────────────────────────────────────────────────────
