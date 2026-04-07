@@ -486,14 +486,90 @@ export function createTpfsAdapter(options: TpfsBashOptions): TpfsPyFs {
  *     apiKey: process.env.TURBOPUFFER_API_KEY!,
  *     mount: "agent-demo",
  *   });
+ *   const bash = await createTpfsBash({
+ *     apiKey: process.env.TURBOPUFFER_API_KEY!,
+ *     mount: "agent-demo",
+ *   });
  *   const result = await bash.exec("ls /project");
  *   console.log(result.stdout);
+ *
+ * Durable CWD:
+ *   After each exec(), the wrapper checks if bash's cwd changed.
+ *   If so, it persists the new cwd via `tpfs cd <newPwd>`.
+ *   A fresh shell created on the same mount will start from that cwd.
  */
-export async function createTpfsBash(options: TpfsBashOptions): Promise<Bash> {
+
+// ── DurableBash wrapper ─────────────────────────────────────────────────────
+
+interface TpfsExecConfig {
+  pythonPath: string;
+  tpfsPath: string;
+  mount: string;
+  apiKey: string;
+  region: string;
+}
+
+/**
+ * Wraps a just-bash Bash instance to persist cwd changes durably
+ * via tpfs cd after each exec().
+ */
+class DurableBash {
+  private bash: Bash;
+  private durableCwd: string;
+  private readonly config: TpfsExecConfig;
+  readonly fs: TpfsPyFs;
+
+  constructor(
+    bash: Bash,
+    initialCwd: string,
+    config: TpfsExecConfig,
+    fs: TpfsPyFs,
+  ) {
+    this.bash = bash;
+    this.durableCwd = initialCwd;
+    this.config = config;
+    this.fs = fs;
+  }
+
+  /** Execute a command with durable cwd tracking. */
+  async exec(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const result = await this.bash.exec(command);
+
+    // Check if cwd changed after exec
+    const newCwd = this.bash.getCwd();
+    if (newCwd && newCwd !== this.durableCwd) {
+      // Persist the new cwd durably
+      try {
+        tpfsExec(
+          this.config.pythonPath,
+          this.config.tpfsPath,
+          this.config.mount,
+          this.config.apiKey,
+          this.config.region,
+          ["cd", newCwd],
+        );
+        this.durableCwd = newCwd;
+      } catch {
+        // If cd fails (e.g. path doesn't exist in tpfs), keep old cwd
+      }
+    }
+
+    return result;
+  }
+
+  /** Get the current durable working directory. */
+  getCwd(): string {
+    return this.durableCwd;
+  }
+}
+
+export async function createTpfsBash(options: TpfsBashOptions): Promise<DurableBash> {
   const pythonPath = options.pythonPath ?? "python3";
   const tpfsPath = options.tpfsPath ?? join(dirname(fileURLToPath(import.meta.url)), "tpfs.py");
   const mount = options.mount ?? "demo";
   const region = options.region ?? "aws-us-west-2";
+
+  const config: TpfsExecConfig = { pythonPath, tpfsPath, mount, apiKey: options.apiKey, region };
 
   // Initialize workspace if needed (init is idempotent — safe to call always)
   if (options.autoInit !== false) {
@@ -532,7 +608,7 @@ export async function createTpfsBash(options: TpfsBashOptions): Promise<Bash> {
     },
   });
 
-  return bash;
+  return new DurableBash(bash, cwd, config, fs);
 }
 
 // ── CLI demo ────────────────────────────────────────────────────────────────
@@ -547,7 +623,7 @@ async function main() {
   const mount = process.argv[2] ?? "demo";
   console.log(`Creating just-bash shell backed by turbopuffer (mount: ${mount})...\n`);
 
-  const bash = await createTpfsBash({
+  const durableBash = await createTpfsBash({
     apiKey,
     mount,
     region: process.env.TURBOPUFFER_REGION ?? "aws-us-west-2",
@@ -569,7 +645,7 @@ async function main() {
 
   for (const cmd of commands) {
     console.log(`$ ${cmd}`);
-    const result = await bash.exec(cmd);
+    const result = await durableBash.exec(cmd);
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
     if (result.exitCode !== 0) console.log(`(exit ${result.exitCode})`);
