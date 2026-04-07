@@ -313,6 +313,13 @@ def text_substring_filter(
 
     Uses a Glob wrapper: ``*<escaped_pattern>*``.  The remote filter may
     over-approximate in edge cases; callers should do exact local matching.
+
+    .. note::
+
+        Schema v2 removes ``filterable: True`` from the ``text`` field
+        to avoid the documented 4 KiB ceiling risk.  Literal grep is now
+        locally authoritative and does NOT use this filter.  This function
+        is retained for backward compatibility only.
     """
     if not pattern:
         return None
@@ -804,47 +811,64 @@ class TpFS:
         glob_pat: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Two-phase literal grep.
+        """Locally-authoritative literal grep.
 
-        Phase 1 (remote): Query turbopuffer with a text-substring Glob
-        filter to narrow the candidate set.  Also filters on kind=file,
-        is_text=1, subtree, and optional glob.
+        Fetches text files in scope page-by-page (filtered by kind,
+        is_text, subtree, optional glob) and does exact substring
+        matching locally per line.
 
-        Phase 2 (local): For each candidate document, split text into
-        lines and do exact substring matching.  The remote filter may
-        over-approximate (Glob escaping edge cases) but local matching
-        is always exact.
+        Unlike the previous implementation, this does NOT depend on
+        text.filterable (which is removed in schema v2 to avoid the
+        documented 4 KiB ceiling risk).  The ``limit`` parameter caps
+        the number of actual line matches returned, not the number of
+        candidate documents fetched.
         """
         norm_root = normalize_path(root)
-        # Validate root exists
         self._require_exists(norm_root)
 
-        filters = and_filter(
+        # Scope filters — no text filter, locally authoritative
+        scope = and_filter(
             ["kind", "Eq", "file"],
             ["is_text", "Eq", 1],
             subtree_filter(norm_root),
             glob_filter(norm_root, glob_pat, ignore_case) if glob_pat else None,
-            text_substring_filter(pattern, ignore_case),
-        )
-        candidates = self._paginated_query(
-            filters, ["path", "text"], limit=limit,
         )
 
         needle = pattern.lower() if ignore_case else pattern
         results: list[dict[str, Any]] = []
-        for row in candidates:
-            text = str(row.get("text", ""))
-            for line_num, line in enumerate(text.split("\n"), start=1):
-                haystack = line.lower() if ignore_case else line
-                if needle in haystack:
-                    results.append({
-                        "kind": "line_match",
-                        "path": str(row.get("path", "")),
-                        "line_number": line_num,
-                        "line": line,
-                    })
-                    if len(results) >= limit:
-                        return results
+        last_path: str | None = None
+        page_size = 256
+
+        while len(results) < limit:
+            page_filter = and_filter(
+                scope,
+                ["path", "Gt", last_path] if last_path is not None else None,
+            )
+            candidates = self._query(
+                page_filter, ["path", "text"],
+                rank_by=("path", "asc"), limit=page_size,
+            )
+            if not candidates:
+                break
+
+            for row in candidates:
+                text = str(row.get("text", ""))
+                for line_num, line in enumerate(text.split("\n"), start=1):
+                    haystack = line.lower() if ignore_case else line
+                    if needle in haystack:
+                        results.append({
+                            "kind": "line_match",
+                            "path": str(row.get("path", "")),
+                            "line_number": line_num,
+                            "line": line,
+                        })
+                        if len(results) >= limit:
+                            return results
+
+            last_path = str(candidates[-1].get("path", ""))
+            if len(candidates) < page_size:
+                break
+
         return results
 
     def _grep_regex(
@@ -855,41 +879,59 @@ class TpFS:
         glob_pat: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Regex grep.
+        """Locally-authoritative regex grep.
 
-        Remote: fetch all text files in the subtree (with optional glob).
-        No remote text filter — regex can't be approximated by Glob.
-        Local: compile the regex, test each line.
+        Fetches all text files in the subtree page-by-page (with optional
+        glob filter).  Compiles the regex locally and tests each line.
+        The ``limit`` parameter caps actual line matches, not candidate
+        documents.
         """
         norm_root = normalize_path(root)
         self._require_exists(norm_root)
 
-        filters = and_filter(
+        scope = and_filter(
             ["kind", "Eq", "file"],
             ["is_text", "Eq", 1],
             subtree_filter(norm_root),
             glob_filter(norm_root, glob_pat, ignore_case) if glob_pat else None,
-        )
-        candidates = self._paginated_query(
-            filters, ["path", "text"], limit=limit,
         )
 
         flags = re.IGNORECASE if ignore_case else 0
         compiled = re.compile(pattern, flags)
 
         results: list[dict[str, Any]] = []
-        for row in candidates:
-            text = str(row.get("text", ""))
-            for line_num, line in enumerate(text.split("\n"), start=1):
-                if compiled.search(line):
-                    results.append({
-                        "kind": "line_match",
-                        "path": str(row.get("path", "")),
-                        "line_number": line_num,
-                        "line": line,
-                    })
-                    if len(results) >= limit:
-                        return results
+        last_path: str | None = None
+        page_size = 256
+
+        while len(results) < limit:
+            page_filter = and_filter(
+                scope,
+                ["path", "Gt", last_path] if last_path is not None else None,
+            )
+            candidates = self._query(
+                page_filter, ["path", "text"],
+                rank_by=("path", "asc"), limit=page_size,
+            )
+            if not candidates:
+                break
+
+            for row in candidates:
+                text = str(row.get("text", ""))
+                for line_num, line in enumerate(text.split("\n"), start=1):
+                    if compiled.search(line):
+                        results.append({
+                            "kind": "line_match",
+                            "path": str(row.get("path", "")),
+                            "line_number": line_num,
+                            "line": line,
+                        })
+                        if len(results) >= limit:
+                            return results
+
+            last_path = str(candidates[-1].get("path", ""))
+            if len(candidates) < page_size:
+                break
+
         return results
 
     def _grep_bm25(
