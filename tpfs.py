@@ -432,21 +432,41 @@ class TpFS:
     # ── internal query / write helpers ───────────────────────────────────────
 
     def _rows_from_response(self, response: Any) -> list[dict[str, Any]]:
-        """Extract a list of plain dicts from a turbopuffer query response."""
+        """Extract a list of plain dicts from a turbopuffer query response.
+
+        The Python SDK returns a pydantic ``NamespaceQueryResponse`` with
+        a ``.rows`` attribute containing row dicts.  Each row dict has
+        ``id``, ``vector``, and attribute fields.  We normalize them into
+        plain dicts with the vector field stripped.
+        """
         if response is None:
             return []
-        # The Python SDK returns VectorRow objects; convert to dict
+        # SDK response: pydantic model with .rows list of dicts
+        if hasattr(response, "rows"):
+            raw_rows = response.rows
+            if raw_rows is None:
+                return []
+            result: list[dict[str, Any]] = []
+            for row in raw_rows:
+                if isinstance(row, dict):
+                    d = {k: v for k, v in row.items() if k != "vector"}
+                    # Rename 'dist' to '$dist' if present (BM25 scores)
+                    if "dist" in d:
+                        d["$dist"] = d.pop("dist")
+                    result.append(d)
+                elif hasattr(row, "model_dump"):
+                    dumped = row.model_dump()
+                    d = {k: v for k, v in dumped.items()
+                         if k != "vector" and v is not None}
+                    result.append(d)
+                else:
+                    result.append(dict(row))
+            return result
+        # Fallback: iterable of items
         rows: list[dict[str, Any]] = []
         for item in response:
             if isinstance(item, dict):
                 rows.append(item)
-            elif hasattr(item, "id"):
-                d: dict[str, Any] = {"id": item.id}
-                if hasattr(item, "attributes") and item.attributes:
-                    d.update(item.attributes)
-                if hasattr(item, "dist") and item.dist is not None:
-                    d["$dist"] = item.dist
-                rows.append(d)
             else:
                 rows.append(dict(item))
         return rows
@@ -467,7 +487,6 @@ class TpFS:
         if filters is not None:
             params["filters"] = filters
         if limit is not None:
-            params["limit"] = limit
             params["top_k"] = limit
         try:
             resp = self._ns.query(**params)
@@ -538,6 +557,8 @@ class TpFS:
         resp = self._ns.write(upsert_rows=rows, schema=FS_SCHEMA)
         if resp is None:
             return {"status": "ok", "rows": len(rows)}
+        if hasattr(resp, "model_dump"):
+            return resp.model_dump()
         if isinstance(resp, dict):
             return resp
         return {"status": "ok", "rows": len(rows)}
@@ -1162,6 +1183,12 @@ class TpFS:
         norm = normalize_path(path)
         entries = self.find(norm)
 
+        # Build a set of directory paths for rendering
+        dir_paths: set[str] = set()
+        for entry in entries:
+            if entry.get("kind") == "dir":
+                dir_paths.add(str(entry["path"]))
+
         # Build nested dict structure
         root_label = norm
         tree_dict: dict[str, Any] = {}
@@ -1186,7 +1213,7 @@ class TpFS:
 
         # Render tree
         lines = [root_label]
-        _render_tree(tree_dict, lines, "", entries)
+        _render_tree(tree_dict, lines, "", dir_paths, norm)
         return "\n".join(lines)
 
     # ── word count ───────────────────────────────────────────────────────────
@@ -1213,7 +1240,8 @@ def _render_tree(
     node: dict[str, Any],
     lines: list[str],
     prefix: str,
-    all_entries: list[dict[str, Any]],
+    dir_paths: set[str],
+    current_path: str,
 ) -> None:
     """Recursively render a tree dict into lines with box-drawing chars."""
     keys = sorted(node.keys())
@@ -1221,13 +1249,17 @@ def _render_tree(
         is_last = i == len(keys) - 1
         connector = "└── " if is_last else "├── "
         child = node[key]
-        # Determine if this is a directory (has children in tree)
-        if child:
-            lines.append(f"{prefix}{connector}{key}/")
-            extension_prefix = f"{prefix}{'    ' if is_last else '│   '}"
-            _render_tree(child, lines, extension_prefix, all_entries)
+        # Build the full path for this node
+        if current_path == "/":
+            child_path = f"/{key}"
         else:
-            lines.append(f"{prefix}{connector}{key}")
+            child_path = f"{current_path}/{key}"
+        is_dir = child_path in dir_paths or bool(child)
+        suffix = "/" if is_dir else ""
+        lines.append(f"{prefix}{connector}{key}{suffix}")
+        if child:
+            ext_prefix = f"{prefix}{'    ' if is_last else '│   '}"
+            _render_tree(child, lines, ext_prefix, dir_paths, child_path)
 
 
 # ── error helpers ────────────────────────────────────────────────────────────
