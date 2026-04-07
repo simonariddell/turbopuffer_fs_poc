@@ -135,6 +135,10 @@ python tpfs.py --help
 | `touch` | `tpfs touch <path>` | Create empty file |
 | `wc` | `tpfs wc <path>` | Count lines/words/chars/bytes |
 | `replace` | `tpfs replace <path> --search S --replace R` | Search & replace |
+| `hydrate` | `tpfs hydrate <local_dir> [--root R]` | Pull workspace to local disk |
+| `sync` | `tpfs sync <local_dir> --manifest M` | Push local changes back |
+| `ingest` | `tpfs ingest <local_dir> [--mount-root R]` | Upload local dir to turbopuffer |
+| `log` | `tpfs log` | Show durable command log |
 | `delete-mount` | `tpfs delete-mount` | Delete entire mount |
 
 **Global options:** `--mount/-m` (default: `demo`), `--api-key`, `--region`, `--json`
@@ -346,6 +350,77 @@ $ tpfs tree /project
 v0.1→v0.2 — all of it survived machine death because it was durably written to
 turbopuffer. The new machine didn't need any local disk, any sidecar database,
 or any sync daemon. It just read from turbopuffer.
+
+### Act 6 — Hydrate → run tools locally → sync back
+
+This is the bridge between "filesystem in the cloud" and "actually running
+code." Hydrate pulls the workspace to a local directory so you can run real
+tools (pytest, linters, compilers). Sync pushes changes back.
+
+**Pull workspace to local disk:**
+```
+$ tpfs hydrate /tmp/sandbox --root /project --manifest-out /tmp/manifest.json
+✓ Hydrated
+  local:  /tmp/sandbox
+  root:   /project
+  files:  3
+  dirs:   2
+  manifest: /tmp/manifest.json
+```
+
+Now `/tmp/sandbox` contains real files — you can `cd` into it and run `pytest`,
+`npm test`, `cargo build`, whatever your project needs.
+
+**Agent modifies code locally:**
+```
+  • Modified solver.py (v0.2 → v0.3, added discriminant function)
+  • Created REVIEW.md
+  • Deleted README.md
+```
+
+**Push changes back to turbopuffer:**
+```
+$ tpfs sync /tmp/sandbox --manifest /tmp/manifest.json
+✓ Synced
+  created:   1
+  modified:  1
+  deleted:   2
+  unchanged: 2
+```
+
+Sync compares local files against the hydration snapshot. It detects what was
+created, modified, and deleted — and pushes only the changes. If someone else
+modified a file in turbopuffer since hydration, sync reports a conflict instead
+of silently overwriting.
+
+**Verify the changes landed:**
+```
+$ tpfs tree /project
+/project
+├── REVIEW.md
+└── solver.py
+
+$ tpfs head /project/solver.py -n 1
+"""Quadratic solver v0.3 — upgraded locally with new features."""
+```
+
+The local sandbox is disposable. Turbopuffer is the durable truth.
+
+---
+
+## Running the Full Demo
+
+A self-contained demo script runs all seven acts end-to-end:
+
+```bash
+export TURBOPUFFER_API_KEY="..."
+./demo.sh                   # uses mount "solver-agent"
+./demo.sh my-custom-mount   # uses custom mount name
+```
+
+The script initializes a workspace, writes files, searches, edits, hydrates to
+local disk, modifies locally, syncs back, and verifies recovery — all in about
+25 seconds. It cleans up after itself.
 
 ---
 
