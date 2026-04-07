@@ -2205,7 +2205,50 @@ class TpFSState:
 pass_state = click.make_pass_decorator(TpFSState)
 
 
-@click.group()
+# ── JSON error envelope ─────────────────────────────────────────────────────
+
+# Maps Python exception types to stable machine-readable error codes.
+_ERROR_TYPE_MAP: dict[type, str] = {
+    FileNotFoundError: "FileNotFoundError",
+    IsADirectoryError: "IsADirectoryError",
+    NotADirectoryError: "NotADirectoryError",
+    FileExistsError: "FileExistsError",
+    PermissionError: "PermissionError",
+    ValueError: "ValueError",
+    OSError: "OSError",
+}
+
+# Thread-local (process-global for Click) flag for JSON mode
+_json_mode: bool = False
+
+
+def _json_err(error_type: str, message: str) -> None:
+    """Emit a structured JSON error to stderr."""
+    click.echo(json.dumps({
+        "error": {"type": error_type, "message": message}
+    }), err=True)
+
+
+class TpFSGroup(click.Group):
+    """Custom Click group that emits structured JSON errors when --json is set."""
+
+    def invoke(self, ctx: click.Context) -> Any:
+        global _json_mode  # noqa: PLW0603
+        # Parse --json early so error handler knows the mode
+        _json_mode = "--json" in sys.argv
+        try:
+            return super().invoke(ctx)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            if _json_mode:
+                error_type = _ERROR_TYPE_MAP.get(type(exc), type(exc).__name__)
+                _json_err(error_type, str(exc))
+                raise SystemExit(1) from exc
+            raise
+
+
+@click.group(cls=TpFSGroup)
 @click.option("--api-key", envvar="TURBOPUFFER_API_KEY", default=None,
               help="Turbopuffer API key (or set TURBOPUFFER_API_KEY).")
 @click.option("--region", envvar="TURBOPUFFER_REGION", default="aws-us-west-2",
@@ -2223,8 +2266,13 @@ def cli(ctx: click.Context, api_key: str | None, region: str,
     Agents can boot, work, die, and reboot — recovering all state
     from turbopuffer alone.
     """
+    global _json_mode  # noqa: PLW0603
+    _json_mode = use_json
     if not api_key:
-        click.echo("Error: --api-key or TURBOPUFFER_API_KEY is required.", err=True)
+        if use_json:
+            _json_err("ConfigError", "--api-key or TURBOPUFFER_API_KEY is required")
+        else:
+            click.echo("Error: --api-key or TURBOPUFFER_API_KEY is required.", err=True)
         ctx.exit(1)
         return
     fs = TpFS(api_key=api_key, region=region, mount=mount)
