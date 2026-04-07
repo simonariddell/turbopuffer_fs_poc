@@ -1103,6 +1103,281 @@ class TpFS:
         self.save_session(session)
         return resolved
 
+    # ── hydration & sync ─────────────────────────────────────────────────────
+
+    def hydrate(
+        self,
+        local_root: str,
+        *,
+        root: str = "/",
+    ) -> dict[str, Any]:
+        """Hydrate: pull the workspace from turbopuffer to a local directory.
+
+        Creates a local mirror of the durable filesystem.  Returns a manifest
+        that records the snapshot state for later sync.
+        """
+        import pathlib
+
+        norm_root = normalize_path(root)
+        local = pathlib.Path(local_root).resolve()
+        local.mkdir(parents=True, exist_ok=True)
+
+        entries = self.find(norm_root)
+        manifest_entries: dict[str, dict[str, Any]] = {}
+
+        for entry in entries:
+            entry_path = str(entry["path"])
+            # Compute local path
+            if norm_root == "/":
+                rel = entry_path.lstrip("/")
+            else:
+                rel = entry_path[len(norm_root):].lstrip("/")
+            local_path = local / rel if rel else local
+
+            if entry.get("kind") == "dir":
+                local_path.mkdir(parents=True, exist_ok=True)
+            else:
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                if entry.get("is_text"):
+                    text = self.cat(entry_path)
+                    local_path.write_text(text, encoding="utf-8")
+                else:
+                    data = self.read_bytes(entry_path)
+                    local_path.write_bytes(data)
+
+            manifest_entries[entry_path] = {
+                "path": entry_path,
+                "kind": entry.get("kind", "file"),
+                "sha256": entry.get("sha256"),
+                "mime": entry.get("mime"),
+                "size_bytes": entry.get("size_bytes", 0),
+                "is_text": entry.get("is_text", 0),
+            }
+
+        session = self.load_session()
+        manifest = {
+            "mount": self.mount,
+            "hydrated_at": now_iso(),
+            "root": norm_root,
+            "cwd": session.get("cwd", "/"),
+            "workspace_metadata_path": "/state/workspace.json",
+            "local_root": str(local),
+            "entries": manifest_entries,
+            "snapshot": manifest_entries,
+        }
+        return manifest
+
+    def sync(
+        self,
+        local_root: str,
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Sync: push local changes back to turbopuffer.
+
+        Compares the local directory against the hydration snapshot to detect
+        created, modified, and deleted files.  Detects remote conflicts
+        (files changed in turbopuffer since hydration).
+        """
+        import pathlib
+
+        local = pathlib.Path(local_root).resolve()
+        sync_root = str(manifest.get("root", "/"))
+        snapshot = manifest.get("snapshot", manifest.get("entries", {}))
+
+        # Scan local directory
+        local_entries: dict[str, dict[str, Any]] = {}
+        for local_path in sorted(local.rglob("*")):
+            rel = str(local_path.relative_to(local))
+            if sync_root == "/":
+                mount_path = normalize_path(f"/{rel}")
+            else:
+                mount_path = normalize_path(f"{sync_root}/{rel}")
+            if local_path.is_dir():
+                local_entries[mount_path] = {
+                    "path": mount_path, "kind": "dir",
+                    "size_bytes": 0, "is_text": 0,
+                }
+            else:
+                data = local_path.read_bytes()
+                digest = sha256_hex(data)
+                is_text = _is_probably_text(mount_path, data)
+                local_entries[mount_path] = {
+                    "path": mount_path, "kind": "file",
+                    "sha256": digest,
+                    "size_bytes": len(data),
+                    "is_text": 1 if is_text else 0,
+                }
+        # Also add the root dir itself
+        if sync_root == "/":
+            local_entries["/"] = {"path": "/", "kind": "dir", "size_bytes": 0, "is_text": 0}
+
+        # Fetch current remote state
+        current_rows = self.find(sync_root)
+        current_map = {str(r["path"]): r for r in current_rows}
+
+        created: list[str] = []
+        modified: list[str] = []
+        deleted: list[str] = []
+        unchanged: list[str] = []
+        conflicts: list[dict[str, str]] = []
+
+        all_paths = sorted(set(list(local_entries.keys()) + list(snapshot.keys())))
+        for path in all_paths:
+            if path == "/":
+                continue
+            snap = snapshot.get(path)
+            curr = current_map.get(path)
+            loc = local_entries.get(path)
+
+            # Did local change vs snapshot?
+            local_changed = _entry_changed(snap, loc)
+            if not local_changed:
+                unchanged.append(path)
+                continue
+
+            # Did remote change vs snapshot?
+            remote_changed = _entry_changed(snap, curr)
+            if remote_changed:
+                conflicts.append({"path": path, "reason": "remote_changed_since_hydration"})
+                continue
+
+            if loc is None:
+                # Deleted locally
+                self.rm(path, recursive=(curr or {}).get("kind") == "dir")
+                deleted.append(path)
+                continue
+
+            local_file = local / path.lstrip("/") if sync_root == "/" else local / path[len(sync_root):].lstrip("/")
+
+            if loc["kind"] == "dir":
+                if not curr:
+                    self.mkdir(path)
+                    created.append(path)
+                else:
+                    unchanged.append(path)
+                continue
+
+            data = local_file.read_bytes()
+            if loc.get("is_text"):
+                self.put_text(path, data.decode("utf-8"),
+                              mime=(curr or {}).get("mime") or loc.get("mime"))
+            else:
+                self.put_bytes(path, data,
+                               mime=(curr or {}).get("mime") or loc.get("mime"))
+
+            if curr:
+                modified.append(path)
+            else:
+                created.append(path)
+
+        return {
+            "mount": self.mount,
+            "root": sync_root,
+            "created": created,
+            "modified": modified,
+            "deleted": deleted,
+            "unchanged": unchanged,
+            "conflicts": conflicts,
+        }
+
+    # ── ingest ───────────────────────────────────────────────────────────────
+
+    def ingest(
+        self,
+        local_root: str,
+        *,
+        mount_root: str = "/",
+        batch_size: int = 256,
+    ) -> dict[str, Any]:
+        """Ingest: upload an entire local directory to turbopuffer.
+
+        Scans the local directory recursively and upserts all files and
+        directories as documents.
+        """
+        import pathlib
+
+        local = pathlib.Path(local_root).resolve()
+        if not local.is_dir():
+            raise NotADirectoryError(str(local))
+
+        norm_mount_root = normalize_path(mount_root)
+        rows: list[dict[str, Any]] = []
+
+        for local_path in sorted(local.rglob("*")):
+            rel = str(local_path.relative_to(local))
+            if norm_mount_root == "/":
+                mount_path = normalize_path(f"/{rel}")
+            else:
+                mount_path = normalize_path(f"{norm_mount_root}/{rel}")
+
+            if local_path.is_dir():
+                rows.append(directory_row(mount_path))
+            else:
+                data = local_path.read_bytes()
+                if _is_probably_text(mount_path, data):
+                    rows.append(text_row(mount_path, data.decode("utf-8")))
+                else:
+                    rows.append(bytes_row(mount_path, data))
+
+        # Also add mount_root itself and ancestors
+        for ancestor in ancestor_paths(norm_mount_root, include_self=True):
+            rows.insert(0, directory_row(ancestor))
+
+        # Upsert in batches
+        total_written = 0
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i : i + batch_size]
+            self._upsert(batch)
+            total_written += len(batch)
+
+        return {
+            "mount": self.mount,
+            "namespace": self.namespace,
+            "local_root": str(local),
+            "mount_root": norm_mount_root,
+            "files": total_written,
+        }
+
+    # ── command logging ──────────────────────────────────────────────────────
+
+    def log_command(
+        self,
+        command: str,
+        *,
+        cwd_before: str | None = None,
+        cwd_after: str | None = None,
+        exit_code: int = 0,
+        stdout_preview: str = "",
+        stderr_preview: str = "",
+    ) -> dict[str, Any]:
+        """Append a command log entry to ``/logs/run.jsonl``.
+
+        Each entry is a JSON line with timestamp, command, cwd, and
+        exit information.  The log is append-only and durable.
+        """
+        cwd = cwd_before or self.pwd()
+        entry = {
+            "timestamp": now_iso(),
+            "command": command,
+            "cwd_before": cwd,
+            "cwd_after": cwd_after or cwd,
+            "exit_code": exit_code,
+            "stdout_preview": stdout_preview[:2000],
+            "stderr_preview": stderr_preview[:2000],
+        }
+        line = json.dumps(entry) + "\n"
+        self.append("/logs/run.jsonl", line)
+        return entry
+
+    def read_log(self) -> list[dict[str, Any]]:
+        """Read the command log from ``/logs/run.jsonl``."""
+        text = self.cat("/logs/run.jsonl")
+        entries: list[dict[str, Any]] = []
+        for line in text.strip().split("\n"):
+            if line.strip():
+                entries.append(json.loads(line))
+        return entries
+
     # ── workspace operations ─────────────────────────────────────────────────
 
     def init_workspace(self) -> dict[str, Any]:
@@ -1298,6 +1573,38 @@ def _extract_snippet(
     return text[:max_len]
 
 
+def _is_probably_text(path: str, data: bytes) -> bool:
+    """Heuristic: is this file text?  Checks for NUL bytes and known extensions."""
+    if b"\x00" in data:
+        return False
+    ext = extension(path).lower()
+    if ext in TEXT_EXTENSIONS:
+        return True
+    # Try UTF-8 decode
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def _entry_changed(
+    a: dict[str, Any] | None,
+    b: dict[str, Any] | None,
+) -> bool:
+    """Check if two snapshot entries differ."""
+    if a is None and b is None:
+        return False
+    if a is None or b is None:
+        return True
+    return (
+        a.get("kind") != b.get("kind")
+        or a.get("sha256") != b.get("sha256")
+        or a.get("size_bytes") != b.get("size_bytes")
+        or a.get("is_text") != b.get("is_text")
+    )
+
+
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  Section 5: Output Formatting  (pure functions)                            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -1401,27 +1708,13 @@ def cli(ctx: click.Context, api_key: str | None, region: str,
     ctx.obj = TpFSState(fs, use_json)
 
 
-def _handle_error(state: TpFSState, exc: Exception) -> None:
-    """Uniform error reporting."""
-    error_type = type(exc).__name__
-    msg = str(exc)
-    if state.use_json:
-        _json_out({"error": error_type, "message": msg})
-    else:
-        click.echo(click.style(f"Error: {msg}", fg="red"), err=True)
-
-
 # ── init ─────────────────────────────────────────────────────────────────────
 
 @cli.command()
 @pass_state
 def init(state: TpFSState) -> None:
     """Initialize a workspace with standard directory layout."""
-    try:
-        result = state.fs.init_workspace()
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    result = state.fs.init_workspace()
     if state.use_json:
         _json_out(result)
     else:
@@ -1438,11 +1731,7 @@ def init(state: TpFSState) -> None:
 @pass_state
 def mounts(state: TpFSState) -> None:
     """List all filesystem mounts."""
-    try:
-        result = state.fs.list_mounts()
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    result = state.fs.list_mounts()
     if state.use_json:
         _json_out(result)
     else:
@@ -1458,11 +1747,7 @@ def mounts(state: TpFSState) -> None:
 @pass_state
 def pwd(state: TpFSState) -> None:
     """Print the durable working directory."""
-    try:
-        cwd = state.fs.pwd()
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
     if state.use_json:
         _json_out({"cwd": cwd, "mount": state.fs.mount})
     else:
@@ -1476,11 +1761,7 @@ def pwd(state: TpFSState) -> None:
 @pass_state
 def cd(state: TpFSState, path: str) -> None:
     """Change the durable working directory."""
-    try:
-        cwd = state.fs.cd(path)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.cd(path)
     if state.use_json:
         _json_out({"cwd": cwd, "mount": state.fs.mount})
     else:
@@ -1495,13 +1776,9 @@ def cd(state: TpFSState, path: str) -> None:
 @pass_state
 def ls(state: TpFSState, path: str, limit: int | None) -> None:
     """List directory contents."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        entries = state.fs.ls(resolved, limit=limit)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    entries = state.fs.ls(resolved, limit=limit)
     if state.use_json:
         _json_out(entries)
     else:
@@ -1518,13 +1795,9 @@ def ls(state: TpFSState, path: str, limit: int | None) -> None:
 @pass_state
 def stat(state: TpFSState, path: str) -> None:
     """Show metadata for a file or directory."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.stat(resolved)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.stat(resolved)
     if result is None:
         if state.use_json:
             _json_out(None)
@@ -1544,18 +1817,13 @@ def stat(state: TpFSState, path: str) -> None:
 @pass_state
 def cat(state: TpFSState, path: str) -> None:
     """Print the contents of a text file."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        text = state.fs.cat(resolved)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    text = state.fs.cat(resolved)
     if state.use_json:
         _json_out({"path": resolve_path(path, state.fs.pwd()), "text": text})
     else:
         click.echo(text, nl=False)
-        # Ensure trailing newline if text doesn't end with one
         if text and not text.endswith("\n"):
             click.echo()
 
@@ -1568,13 +1836,9 @@ def cat(state: TpFSState, path: str) -> None:
 @pass_state
 def head(state: TpFSState, path: str, n: int) -> None:
     """Print the first N lines of a text file."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.head(resolved, n)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.head(resolved, n)
     if state.use_json:
         _json_out(result)
     else:
@@ -1590,13 +1854,9 @@ def head(state: TpFSState, path: str, n: int) -> None:
 @pass_state
 def tail(state: TpFSState, path: str, n: int) -> None:
     """Print the last N lines of a text file."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.tail(resolved, n)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.tail(resolved, n)
     if state.use_json:
         _json_out(result)
     else:
@@ -1612,13 +1872,9 @@ def tail(state: TpFSState, path: str, n: int) -> None:
 @pass_state
 def tree(state: TpFSState, path: str, depth: int) -> None:
     """Show a directory tree."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.tree(resolved, max_depth=depth)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.tree(resolved, max_depth=depth)
     if state.use_json:
         _json_out({"tree": result})
     else:
@@ -1638,16 +1894,12 @@ def tree(state: TpFSState, path: str, depth: int) -> None:
 def find(state: TpFSState, root: str, glob_pattern: str | None,
          kind: str | None, ignore_case: bool, limit: int | None) -> None:
     """Recursively find files and directories."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(root, cwd)
-        results = state.fs.find(
-            resolved, glob=glob_pattern, kind=kind,
-            ignore_case=ignore_case, limit=limit,
-        )
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(root, cwd)
+    results = state.fs.find(
+        resolved, glob=glob_pattern, kind=kind,
+        ignore_case=ignore_case, limit=limit,
+    )
     if state.use_json:
         _json_out(results)
     else:
@@ -1673,16 +1925,12 @@ def grep(state: TpFSState, pattern: str, root: str, mode: str,
 
     Modes: literal (exact substring), regex, bm25 (ranked full-text).
     """
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(root, cwd)
-        results = state.fs.grep(
-            resolved, pattern, mode=mode, ignore_case=ignore_case,
-            glob=glob_pattern, limit=limit,
-        )
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(root, cwd)
+    results = state.fs.grep(
+        resolved, pattern, mode=mode, ignore_case=ignore_case,
+        glob=glob_pattern, limit=limit,
+    )
     if state.use_json:
         _json_out(results)
     else:
@@ -1699,13 +1947,9 @@ def grep(state: TpFSState, pattern: str, root: str, mode: str,
 @pass_state
 def mkdir(state: TpFSState, path: str) -> None:
     """Create a directory (and parents)."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.mkdir(resolved)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.mkdir(resolved)
     if state.use_json:
         _json_out(result)
     else:
@@ -1725,25 +1969,18 @@ def mkdir(state: TpFSState, path: str) -> None:
 def put(state: TpFSState, path: str, text_content: str | None,
         use_stdin: bool, from_file: str | None, mime: str | None) -> None:
     """Write a text file."""
-    try:
-        if text_content is not None:
-            content = text_content
-        elif use_stdin:
-            content = sys.stdin.read()
-        elif from_file is not None:
-            with open(from_file, "r") as f:
-                content = f.read()
-        else:
-            click.echo("Error: provide --text, --stdin, or --file", err=True)
-            raise SystemExit(1)
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.put_text(resolved, content, mime=mime)
-    except SystemExit:
-        raise
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    if text_content is not None:
+        content = text_content
+    elif use_stdin:
+        content = sys.stdin.read()
+    elif from_file is not None:
+        with open(from_file, "r") as f:
+            content = f.read()
+    else:
+        raise click.UsageError("provide --text, --stdin, or --file")
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.put_text(resolved, content, mime=mime)
     if state.use_json:
         _json_out(result)
     else:
@@ -1758,13 +1995,9 @@ def put(state: TpFSState, path: str, text_content: str | None,
 @pass_state
 def rm(state: TpFSState, path: str, recursive: bool) -> None:
     """Remove a file or directory."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.rm(resolved, recursive=recursive)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.rm(resolved, recursive=recursive)
     if state.use_json:
         _json_out(result)
     else:
@@ -1784,14 +2017,10 @@ def rm(state: TpFSState, path: str, recursive: bool) -> None:
 @pass_state
 def cp(state: TpFSState, src: str, dst: str) -> None:
     """Copy a file."""
-    try:
-        cwd = state.fs.pwd()
-        src_r = resolve_path(src, cwd)
-        dst_r = resolve_path(dst, cwd)
-        result = state.fs.cp(src_r, dst_r)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    src_r = resolve_path(src, cwd)
+    dst_r = resolve_path(dst, cwd)
+    result = state.fs.cp(src_r, dst_r)
     if state.use_json:
         _json_out(result)
     else:
@@ -1806,14 +2035,10 @@ def cp(state: TpFSState, src: str, dst: str) -> None:
 @pass_state
 def mv(state: TpFSState, src: str, dst: str) -> None:
     """Move a file."""
-    try:
-        cwd = state.fs.pwd()
-        src_r = resolve_path(src, cwd)
-        dst_r = resolve_path(dst, cwd)
-        result = state.fs.mv(src_r, dst_r)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    src_r = resolve_path(src, cwd)
+    dst_r = resolve_path(dst, cwd)
+    result = state.fs.mv(src_r, dst_r)
     if state.use_json:
         _json_out(result)
     else:
@@ -1827,13 +2052,9 @@ def mv(state: TpFSState, src: str, dst: str) -> None:
 @pass_state
 def touch(state: TpFSState, path: str) -> None:
     """Create an empty file (no-op if exists)."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.touch(resolved)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.touch(resolved)
     if state.use_json:
         _json_out(result)
     else:
@@ -1848,13 +2069,9 @@ def touch(state: TpFSState, path: str) -> None:
 @pass_state
 def wc(state: TpFSState, path: str) -> None:
     """Count lines, words, characters, and bytes."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.wc(resolved)
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.wc(resolved)
     if state.use_json:
         _json_out(result)
     else:
@@ -1875,15 +2092,11 @@ def wc(state: TpFSState, path: str) -> None:
 def replace(state: TpFSState, path: str, search: str, replace_with: str,
             ignore_case: bool) -> None:
     """Search and replace text in a file."""
-    try:
-        cwd = state.fs.pwd()
-        resolved = resolve_path(path, cwd)
-        result = state.fs.replace_text(
-            resolved, search, replace_with, ignore_case=ignore_case,
-        )
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.replace_text(
+        resolved, search, replace_with, ignore_case=ignore_case,
+    )
     if state.use_json:
         _json_out(result)
     else:
@@ -1895,17 +2108,106 @@ def replace(state: TpFSState, path: str, search: str, replace_with: str,
             click.echo(f"  {result['path']}: {result['matches']} match(es), no change")
 
 
+# ── hydrate ──────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("local_root")
+@click.option("--root", default="/", help="tpfs root to hydrate from.")
+@click.option("--manifest-out", default=None, help="Write manifest JSON to file.")
+@pass_state
+def hydrate(state: TpFSState, local_root: str, root: str, manifest_out: str | None) -> None:
+    """Hydrate: pull workspace from turbopuffer to a local directory."""
+    result = state.fs.hydrate(local_root, root=root)
+    if manifest_out:
+        import pathlib
+        pathlib.Path(manifest_out).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(manifest_out).write_text(json.dumps(result, indent=2))
+        result["manifest_file"] = manifest_out
+    if state.use_json:
+        _json_out(result)
+    else:
+        n_files = sum(1 for e in result["entries"].values() if e["kind"] == "file")
+        n_dirs = sum(1 for e in result["entries"].values() if e["kind"] == "dir")
+        click.echo(click.style("✓ Hydrated", fg="green", bold=True))
+        click.echo(f"  local:  {local_root}")
+        click.echo(f"  root:   {root}")
+        click.echo(f"  files:  {n_files}")
+        click.echo(f"  dirs:   {n_dirs}")
+        if manifest_out:
+            click.echo(f"  manifest: {manifest_out}")
+
+
+# ── sync ─────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("local_root")
+@click.option("--manifest", "manifest_file", required=True,
+              help="Path to hydration manifest JSON.", type=click.Path(exists=True))
+@pass_state
+def sync(state: TpFSState, local_root: str, manifest_file: str) -> None:
+    """Sync: push local changes back to turbopuffer."""
+    with open(manifest_file, "r") as f:
+        manifest = json.loads(f.read())
+    result = state.fs.sync(local_root, manifest)
+    if state.use_json:
+        _json_out(result)
+    else:
+        click.echo(click.style("✓ Synced", fg="green", bold=True))
+        click.echo(f"  created:   {len(result['created'])}")
+        click.echo(f"  modified:  {len(result['modified'])}")
+        click.echo(f"  deleted:   {len(result['deleted'])}")
+        click.echo(f"  unchanged: {len(result['unchanged'])}")
+        if result["conflicts"]:
+            click.echo(click.style(f"  conflicts: {len(result['conflicts'])}", fg="red"))
+            for c in result["conflicts"]:
+                click.echo(f"    {c['path']}: {c['reason']}")
+
+
+# ── ingest ───────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("local_root", type=click.Path(exists=True))
+@click.option("--mount-root", default="/", help="Mount root path (default: /).")
+@click.option("--batch-size", type=int, default=256, help="Batch size for upserts.")
+@pass_state
+def ingest(state: TpFSState, local_root: str, mount_root: str, batch_size: int) -> None:
+    """Ingest: upload a local directory to turbopuffer."""
+    result = state.fs.ingest(local_root, mount_root=mount_root, batch_size=batch_size)
+    if state.use_json:
+        _json_out(result)
+    else:
+        click.echo(click.style("✓ Ingested", fg="green", bold=True))
+        click.echo(f"  from:   {result['local_root']}")
+        click.echo(f"  to:     {result['mount_root']}")
+        click.echo(f"  docs:   {result['files']}")
+
+
+# ── log ──────────────────────────────────────────────────────────────────────
+
+@cli.command()
+@pass_state
+def log(state: TpFSState) -> None:
+    """Show the durable command log."""
+    entries = state.fs.read_log()
+    if state.use_json:
+        _json_out(entries)
+    else:
+        if not entries:
+            click.echo("(no log entries)")
+        for e in entries:
+            ts = e.get("timestamp", "?")[:19]
+            cmd = e.get("command", "?")
+            code = e.get("exit_code", "?")
+            click.echo(f"  [{ts}] {cmd}  (exit {code})")
+
+
 # ── delete-mount ─────────────────────────────────────────────────────────────
 
 @cli.command("delete-mount")
 @pass_state
 def delete_mount(state: TpFSState) -> None:
     """Delete the entire mount and all its data."""
-    try:
-        result = state.fs.delete_mount()
-    except Exception as exc:
-        _handle_error(state, exc)
-        raise SystemExit(1)
+    result = state.fs.delete_mount()
     if state.use_json:
         _json_out(result)
     else:
