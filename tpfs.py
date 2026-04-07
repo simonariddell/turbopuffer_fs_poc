@@ -1370,13 +1370,14 @@ class TpFS:
         return entry
 
     def read_log(self) -> list[dict[str, Any]]:
-        """Read the command log from ``/logs/run.jsonl``."""
+        """Read the command log from ``/logs/run.jsonl``.
+
+        Returns an empty list if the log file doesn't exist yet.
+        """
+        if not self.exists("/logs/run.jsonl"):
+            return []
         text = self.cat("/logs/run.jsonl")
-        entries: list[dict[str, Any]] = []
-        for line in text.strip().split("\n"):
-            if line.strip():
-                entries.append(json.loads(line))
-        return entries
+        return [json.loads(line) for line in text.strip().split("\n") if line.strip()]
 
     # ── workspace operations ─────────────────────────────────────────────────
 
