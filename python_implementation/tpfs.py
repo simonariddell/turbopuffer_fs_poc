@@ -1851,6 +1851,9 @@ class TpFS:
         present), ensures directories exist but does **not** reset the
         session or overwrite workspace metadata.  This makes ``init``
         safe to call on every shell boot without clobbering durable cwd.
+
+        Uses a single batched write for fresh initialization instead
+        of multiple sequential API calls.
         """
         dirs = ["/state", "/logs", "/output", "/scratch", "/project", "/input"]
 
@@ -1859,9 +1862,21 @@ class TpFS:
 
         if existing_ws is not None:
             # Workspace already initialized — ensure standard dirs exist
-            # (mkdir is already idempotent for existing dirs)
+            # Batch all dir rows into a single upsert (dirs are idempotent)
+            all_dir_rows: list[dict[str, Any]] = []
             for d in dirs:
-                self.mkdir(d)
+                for p in ancestor_paths(d, include_self=True):
+                    all_dir_rows.append(directory_row(p))
+            # Deduplicate by id
+            seen: set[str] = set()
+            unique: list[dict[str, Any]] = []
+            for row in all_dir_rows:
+                rid = str(row["id"])
+                if rid not in seen:
+                    seen.add(rid)
+                    unique.append(row)
+            self._upsert(unique)
+
             session = self.load_session()
             return {
                 "mount": self.mount,
@@ -1871,19 +1886,30 @@ class TpFS:
                 "already_initialized": True,
             }
 
-        # Fresh workspace — create everything
-        for d in dirs:
-            self.mkdir(d)
-
+        # Fresh workspace — batch everything into a single write
         ts = now_iso()
-        session: dict[str, Any] = {
+
+        # Build all directory rows
+        all_rows: list[dict[str, Any]] = []
+        for d in dirs:
+            for p in ancestor_paths(d, include_self=True):
+                all_rows.append(directory_row(p))
+
+        # Add session state document
+        session_data: dict[str, Any] = {
             "cwd": "/project",
             "mount": self.mount,
             "updated_at": ts,
             "path": "/state/session.json",
         }
-        self.save_session(session)
+        all_rows.append(text_row(
+            "/state/session.json",
+            json.dumps(session_data, indent=2),
+            mime="application/json",
+            version=1,
+        ))
 
+        # Add workspace metadata document
         metadata: dict[str, Any] = {
             "path": "/state/workspace.json",
             "mount": self.mount,
@@ -1901,11 +1927,24 @@ class TpFS:
             "project_dir": "/project",
             "input_dir": "/input",
         }
-        self.put_text(
+        all_rows.append(text_row(
             "/state/workspace.json",
             json.dumps(metadata, indent=2),
             mime="application/json",
-        )
+            version=1,
+        ))
+
+        # Deduplicate by id (ancestors of different dirs overlap)
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for row in all_rows:
+            rid = str(row["id"])
+            if rid not in seen:
+                seen.add(rid)
+                unique.append(row)
+
+        # Single batched write
+        self._upsert(unique)
 
         return {
             "mount": self.mount,
