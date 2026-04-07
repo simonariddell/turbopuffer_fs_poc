@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# demo.sh — End-to-end tpfs demo
+# demo.sh — End-to-end tpfs demo (schema v2)
 #
-# Demonstrates a turbopuffer-backed filesystem:
-#   1. Agent boots with no disk → initializes workspace
-#   2. Writes project files
+# Demonstrates a turbopuffer-backed filesystem POC for regular files
+# and directories:
+#   1. Agent boots with no disk → initializes workspace (idempotent)
+#   2. Writes project files (text + binary)
 #   3. Navigates and inspects
 #   4. Searches (literal grep, regex grep, BM25 full-text)
 #   5. Edits code
-#   6. Hydrates to local disk → modifies locally → syncs back
-#   7. "Machine dies" → reboots → all state recovered
+#   6. Recursive cp and mv
+#   7. Hydrates to local disk → modifies locally → syncs back
+#   8. "Machine dies" → reboots → all state recovered
 #
 # Prerequisites:
 #   pip install turbopuffer click
@@ -52,7 +54,7 @@ run pwd
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-banner "ACT 2: Agent writes a project"
+banner "ACT 2: Agent writes a project (text + binary)"
 
 $TPFS put /project/solver.py --text '"""Quadratic solver v0.1 — a numpy-based root finder."""
 import numpy as np
@@ -71,7 +73,7 @@ def solve_batch(equations: list[Tuple[float, float, float]]) -> list[Tuple[compl
 if __name__ == "__main__":
     roots = solve_quadratic(1, -5, 6)
     print(f"x² - 5x + 6 = 0  →  x₁={roots[0]:.2f}, x₂={roots[1]:.2f}")
-'
+' > /dev/null
 echo -e "${DIM}\$ tpfs put /project/solver.py --text '...'${RESET}"
 echo "✓ solver.py written"
 echo
@@ -116,6 +118,13 @@ echo -e "${DIM}\$ tpfs put /project/README.md --text '...'${RESET}"
 echo "✓ README.md written"
 echo
 
+# Write a binary file (small PNG-like payload)
+echo -e "${GREEN}Write a binary file via base64:${RESET}"
+# Generate a small test binary payload
+echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" | $TPFS write-bytes /project/icon.png --stdin-base64 --mime image/png
+echo "✓ icon.png written (binary)"
+echo
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 banner "ACT 3: Agent navigates and inspects"
@@ -124,6 +133,7 @@ run tree /
 run ls .
 run head solver.py -n 5
 run wc solver.py
+run stat icon.png
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -150,7 +160,26 @@ run head solver.py -n 1
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-banner "ACT 6: Hydrate → run tools locally → sync back"
+banner "ACT 6: Recursive cp and mv"
+
+echo -e "${GREEN}Copy entire /project to /backup:${RESET}"
+run cp /project /backup -r
+
+echo -e "${GREEN}Verify /backup tree:${RESET}"
+run tree /backup
+
+echo -e "${GREEN}Move /backup to /archive:${RESET}"
+run mv /backup /archive
+
+echo -e "${GREEN}Verify /archive tree:${RESET}"
+run tree /archive
+
+echo -e "${GREEN}Clean up /archive:${RESET}"
+run rm /archive -r
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+banner "ACT 7: Hydrate → run tools locally → sync back"
 
 echo -e "${GREEN}Pull workspace to local disk:${RESET}"
 run hydrate "$SANDBOX" --root /project --manifest-out "$MANIFEST"
@@ -193,22 +222,30 @@ echo "  • Created REVIEW.md"
 
 # Delete file
 rm "$SANDBOX/README.md"
-echo "  • Deleted README.md"
+echo "  • Deleted README.md (only this file)"
 echo
 
 echo -e "${GREEN}Push changes back to turbopuffer:${RESET}"
 run sync "$SANDBOX" --manifest "$MANIFEST"
 
-echo -e "${GREEN}Verify in turbopuffer:${RESET}"
+echo -e "${GREEN}Verify — test_solver.py must still exist (sync correctness test):${RESET}"
 run tree /project
 run head /project/solver.py -n 1
 
+# Verify binary round-trip
+echo -e "${GREEN}Verify binary round-trip (icon.png SHA-256):${RESET}"
+$TPFS --json read-bytes /project/icon.png | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  sha256: {d[\"sha256\"]}')"
+echo
+
 # ─────────────────────────────────────────────────────────────────────────────
 
-banner "ACT 7: Machine dies. New machine boots."
+banner "ACT 8: Machine dies. New machine boots."
 
 echo -e "${DIM}  (imagine this is a brand new VM with no local state)${RESET}"
 echo
+
+echo -e "${GREEN}Init is idempotent — does not reset cwd:${RESET}"
+run init
 
 run pwd
 run tree /project

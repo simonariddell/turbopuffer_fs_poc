@@ -22,6 +22,7 @@
  *   await bash.exec('echo "hello" > /project/test.txt');
  */
 
+import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
 import { resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -257,8 +258,15 @@ class TpfsPyFs implements IFileSystem {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
-    const text = await this.readFile(path);
-    return new TextEncoder().encode(text);
+    const result = this.call(["read-bytes", path]) as { base64: string } | null;
+    if (!result?.base64) return new Uint8Array();
+    // Decode base64 to Uint8Array
+    const binaryString = atob(result.base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
   }
 
   async writeFile(
@@ -266,10 +274,15 @@ class TpfsPyFs implements IFileSystem {
     content: string | Uint8Array,
     _options?: { encoding?: BufferEncoding } | BufferEncoding,
   ): Promise<void> {
-    const text = content instanceof Uint8Array
-      ? new TextDecoder().decode(content)
-      : content;
-    this.call(["put", path, "--stdin"], text);
+    if (content instanceof Uint8Array) {
+      // Binary path: base64-encode and use write-bytes
+      const b64 = Buffer.from(content).toString("base64");
+      this.call(["write-bytes", path, "--stdin-base64"], b64);
+      this.addPath(path);
+      return;
+    }
+    // Text path: use put with stdin
+    this.call(["put", path, "--stdin"], content);
     this.addPath(path);
   }
 
@@ -360,15 +373,29 @@ class TpfsPyFs implements IFileSystem {
     this.removePath(path, options?.recursive ?? false);
   }
 
-  async cp(src: string, dest: string, _options?: CpOptions): Promise<void> {
-    this.call(["cp", src, dest]);
-    this.addPath(dest);
+  async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
+    const args = ["cp", src, dest];
+    if (options?.recursive) args.push("-r");
+    const result = this.call(args) as Record<string, unknown> | null;
+    // Update cache from result payload, not input args
+    const actualPath = result?.path ?? dest;
+    this.addPath(String(actualPath));
+    // For recursive ops, refresh entire cache
+    if (options?.recursive) {
+      this.refreshPaths();
+    }
   }
 
   async mv(src: string, dest: string): Promise<void> {
-    this.call(["mv", src, dest]);
-    this.removePath(src, false);
-    this.addPath(dest);
+    const result = this.call(["mv", src, dest]) as Record<string, unknown> | null;
+    const actualPath = result?.path ?? dest;
+    // Check if source was a directory (recursive move)
+    const isRecursive = result && "files_copied" in result;
+    this.removePath(src, !!isRecursive);
+    this.addPath(String(actualPath));
+    if (isRecursive) {
+      this.refreshPaths();
+    }
   }
 
   // ── Path operations ─────────────────────────────────────────────────────
@@ -377,6 +404,15 @@ class TpfsPyFs implements IFileSystem {
     return posixResolve(base, target);
   }
 
+  /**
+   * Return the current path inventory.
+   *
+   * **Cache semantics**: This list is seeded at adapter creation via
+   * ``refreshPaths()`` and updated for mutations performed through
+   * this adapter instance.  It may lag concurrent out-of-band writers
+   * until the next ``refreshPaths()`` call.  Glob expansion in
+   * just-bash relies on this cache and is therefore best-effort.
+   */
   getAllPaths(): string[] {
     return [...this.pathCache];
   }
@@ -459,22 +495,94 @@ export function createTpfsAdapter(options: TpfsBashOptions): TpfsPyFs {
  *     apiKey: process.env.TURBOPUFFER_API_KEY!,
  *     mount: "agent-demo",
  *   });
+ *   const bash = await createTpfsBash({
+ *     apiKey: process.env.TURBOPUFFER_API_KEY!,
+ *     mount: "agent-demo",
+ *   });
  *   const result = await bash.exec("ls /project");
  *   console.log(result.stdout);
+ *
+ * Durable CWD:
+ *   After each exec(), the wrapper checks if bash's cwd changed.
+ *   If so, it persists the new cwd via `tpfs cd <newPwd>`.
+ *   A fresh shell created on the same mount will start from that cwd.
  */
-export async function createTpfsBash(options: TpfsBashOptions): Promise<Bash> {
+
+// ── DurableBash wrapper ─────────────────────────────────────────────────────
+
+interface TpfsExecConfig {
+  pythonPath: string;
+  tpfsPath: string;
+  mount: string;
+  apiKey: string;
+  region: string;
+}
+
+/**
+ * Wraps a just-bash Bash instance to persist cwd changes durably
+ * via tpfs cd after each exec().
+ */
+class DurableBash {
+  private bash: Bash;
+  private durableCwd: string;
+  private readonly config: TpfsExecConfig;
+  readonly fs: TpfsPyFs;
+
+  constructor(
+    bash: Bash,
+    initialCwd: string,
+    config: TpfsExecConfig,
+    fs: TpfsPyFs,
+  ) {
+    this.bash = bash;
+    this.durableCwd = initialCwd;
+    this.config = config;
+    this.fs = fs;
+  }
+
+  /** Execute a command with durable cwd tracking. */
+  async exec(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const result = await this.bash.exec(command);
+
+    // Check if cwd changed after exec
+    const newCwd = this.bash.getCwd();
+    if (newCwd && newCwd !== this.durableCwd) {
+      // Persist the new cwd durably
+      try {
+        tpfsExec(
+          this.config.pythonPath,
+          this.config.tpfsPath,
+          this.config.mount,
+          this.config.apiKey,
+          this.config.region,
+          ["cd", newCwd],
+        );
+        this.durableCwd = newCwd;
+      } catch {
+        // If cd fails (e.g. path doesn't exist in tpfs), keep old cwd
+      }
+    }
+
+    return result;
+  }
+
+  /** Get the current durable working directory. */
+  getCwd(): string {
+    return this.durableCwd;
+  }
+}
+
+export async function createTpfsBash(options: TpfsBashOptions): Promise<DurableBash> {
   const pythonPath = options.pythonPath ?? "python3";
   const tpfsPath = options.tpfsPath ?? join(dirname(fileURLToPath(import.meta.url)), "tpfs.py");
   const mount = options.mount ?? "demo";
   const region = options.region ?? "aws-us-west-2";
 
-  // Initialize workspace if needed
+  const config: TpfsExecConfig = { pythonPath, tpfsPath, mount, apiKey: options.apiKey, region };
+
+  // Initialize workspace if needed (init is idempotent — safe to call always)
   if (options.autoInit !== false) {
-    try {
-      tpfsExec(pythonPath, tpfsPath, mount, options.apiKey, region, ["init"]);
-    } catch {
-      // Workspace may already exist — that's fine
-    }
+    tpfsExec(pythonPath, tpfsPath, mount, options.apiKey, region, ["init"]);
   }
 
   // Get current working directory from tpfs session
@@ -509,7 +617,7 @@ export async function createTpfsBash(options: TpfsBashOptions): Promise<Bash> {
     },
   });
 
-  return bash;
+  return new DurableBash(bash, cwd, config, fs);
 }
 
 // ── CLI demo ────────────────────────────────────────────────────────────────
@@ -524,7 +632,7 @@ async function main() {
   const mount = process.argv[2] ?? "demo";
   console.log(`Creating just-bash shell backed by turbopuffer (mount: ${mount})...\n`);
 
-  const bash = await createTpfsBash({
+  const durableBash = await createTpfsBash({
     apiKey,
     mount,
     region: process.env.TURBOPUFFER_REGION ?? "aws-us-west-2",
@@ -546,7 +654,7 @@ async function main() {
 
   for (const cmd of commands) {
     console.log(`$ ${cmd}`);
-    const result = await bash.exec(cmd);
+    const result = await durableBash.exec(cmd);
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
     if (result.exitCode !== 0) console.log(`(exit ${result.exitCode})`);

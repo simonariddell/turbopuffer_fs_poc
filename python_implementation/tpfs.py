@@ -43,6 +43,15 @@ import turbopuffer as tpuf
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 MOUNT_SUFFIX = "__fs"
+SCHEMA_VERSION = 2
+
+# ── Size limits (turbopuffer documented maximums) ────────────────────────────
+# Max attribute value size:  8 MiB
+# Max document size:        64 MiB
+# base64 overhead is ~4/3, so raw binary limit is ~6 MiB to stay under 8 MiB
+MAX_ATTRIBUTE_SIZE: int = 8 * 1024 * 1024        # 8 MiB
+MAX_TEXT_SIZE: int = MAX_ATTRIBUTE_SIZE           # text stored directly
+MAX_BINARY_SIZE: int = int(MAX_ATTRIBUTE_SIZE * 0.74)  # ~5.9 MiB raw → ~8 MiB b64
 
 TEXT_EXTENSIONS: frozenset[str] = frozenset({
     ".c", ".cfg", ".conf", ".cpp", ".css", ".csv", ".dockerfile",
@@ -87,30 +96,32 @@ MIME_TABLE: dict[str, str] = {
 }
 
 FS_SCHEMA: dict[str, Any] = {
-    "path":    {"type": "string", "filterable": True},
-    "parent":  "string",
-    "basename": {"type": "string", "filterable": True},
-    "kind":    "string",
-    "ext":     "string",
-    "mime":    "string",
+    "path":      {"type": "string", "filterable": True, "glob": True},
+    "parent":    "string",
+    "basename":  {"type": "string", "filterable": True, "glob": True},
+    "kind":      "string",
+    "ext":       "string",
+    "mime":      "string",
     "size_bytes": "uint",
-    "is_text": "uint",
+    "is_text":   "uint",
+    "version":   "uint",   # files only; null on dirs is fine
     "text": {
         "type": "string",
-        "filterable": True,
         "full_text_search": {
             "tokenizer": "word_v3",
             "remove_stopwords": False,
             "stemming": False,
         },
+        # do NOT set filterable here — documented 4 KiB ceiling on filterable
+        # values makes it unsafe for general file bodies in this pass
     },
-    "blob_b64": {"type": "string", "filterable": False},
-    "sha256":  "string",
+    "blob_b64":  {"type": "string", "filterable": False},
+    "sha256":    "string",
 }
 
 META_FIELDS: list[str] = [
     "id", "path", "parent", "basename", "kind", "ext",
-    "mime", "size_bytes", "is_text", "sha256",
+    "mime", "size_bytes", "is_text", "version", "sha256",
 ]
 
 CONTENT_FIELDS: list[str] = META_FIELDS + ["text", "blob_b64"]
@@ -302,6 +313,13 @@ def text_substring_filter(
 
     Uses a Glob wrapper: ``*<escaped_pattern>*``.  The remote filter may
     over-approximate in edge cases; callers should do exact local matching.
+
+    .. note::
+
+        Schema v2 removes ``filterable: True`` from the ``text`` field
+        to avoid the documented 4 KiB ceiling risk.  Literal grep is now
+        locally authoritative and does NOT use this filter.  This function
+        is retained for backward compatibility only.
     """
     if not pattern:
         return None
@@ -358,6 +376,7 @@ def text_row(
     path: str,
     text: str,
     mime: str | None = None,
+    version: int | None = None,
 ) -> dict[str, Any]:
     """Build a text-file document."""
     data = text.encode("utf-8")
@@ -370,6 +389,8 @@ def text_row(
         digest=sha256_hex(data),
     )
     row["text"] = text
+    if version is not None:
+        row["version"] = version
     return row
 
 
@@ -377,6 +398,7 @@ def bytes_row(
     path: str,
     data: bytes,
     mime: str | None = None,
+    version: int | None = None,
 ) -> dict[str, Any]:
     """Build a binary-file document."""
     row = _base_row(
@@ -388,6 +410,8 @@ def bytes_row(
         digest=sha256_hex(data),
     )
     row["blob_b64"] = base64.b64encode(data).decode("ascii")
+    if version is not None:
+        row["version"] = version
     return row
 
 
@@ -569,6 +593,86 @@ class TpFS:
             batch = ids[i : i + batch_size]
             self._ns.write(deletes=batch)
 
+    def _write_response_ids(
+        self, resp: Any, kind: str,
+    ) -> list[str]:
+        """Extract affected IDs from a write response.
+
+        *kind* is one of ``"upserted"``, ``"patched"``, ``"deleted"``.
+        """
+        if resp is None:
+            return []
+        field = f"{kind}_ids"
+        if hasattr(resp, field):
+            ids = getattr(resp, field)
+            return [str(i) for i in ids] if ids else []
+        if isinstance(resp, dict):
+            ids = resp.get(field)
+            return [str(i) for i in ids] if ids else []
+        if hasattr(resp, "model_dump"):
+            dumped = resp.model_dump()
+            ids = dumped.get(field)
+            return [str(i) for i in ids] if ids else []
+        return []
+
+    def _conditional_upsert(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[str]:
+        """Upsert rows only if the doc doesn't already exist.
+
+        Returns the IDs that were actually upserted.
+        """
+        if not rows:
+            return []
+        resp = self._ns.write(
+            upsert_rows=rows,
+            upsert_condition=["id", "Eq", None],
+            schema=FS_SCHEMA,
+            return_affected_ids=True,
+        )
+        return self._write_response_ids(resp, "upserted")
+
+    def _conditional_patch(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[str]:
+        """Patch rows using version-based optimistic concurrency.
+
+        The patch succeeds only if the remote version is less than the
+        incoming version (``$ref_new``).  Returns the IDs that were
+        actually patched.
+        """
+        if not rows:
+            return []
+        resp = self._ns.write(
+            patch_rows=rows,
+            patch_condition=["version", "Lt", {"$ref_new": "version"}],
+            schema=FS_SCHEMA,
+            return_affected_ids=True,
+        )
+        return self._write_response_ids(resp, "patched")
+
+    def _conditional_delete(
+        self,
+        ids: list[str],
+        expected_version: int | None = None,
+    ) -> list[str]:
+        """Delete rows with optional version-based condition.
+
+        Returns the IDs that were actually deleted.
+        """
+        if not ids:
+            return []
+        kwargs: dict[str, Any] = {
+            "deletes": ids,
+            "return_affected_ids": True,
+        }
+        if expected_version is not None:
+            kwargs["delete_condition"] = ["version", "Eq", expected_version]
+        resp = self._ns.write(**kwargs)
+        return self._write_response_ids(resp, "deleted")
+
     # ── read operations ──────────────────────────────────────────────────────
 
     def stat(self, path: str) -> dict[str, Any] | None:
@@ -707,47 +811,64 @@ class TpFS:
         glob_pat: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Two-phase literal grep.
+        """Locally-authoritative literal grep.
 
-        Phase 1 (remote): Query turbopuffer with a text-substring Glob
-        filter to narrow the candidate set.  Also filters on kind=file,
-        is_text=1, subtree, and optional glob.
+        Fetches text files in scope page-by-page (filtered by kind,
+        is_text, subtree, optional glob) and does exact substring
+        matching locally per line.
 
-        Phase 2 (local): For each candidate document, split text into
-        lines and do exact substring matching.  The remote filter may
-        over-approximate (Glob escaping edge cases) but local matching
-        is always exact.
+        Unlike the previous implementation, this does NOT depend on
+        text.filterable (which is removed in schema v2 to avoid the
+        documented 4 KiB ceiling risk).  The ``limit`` parameter caps
+        the number of actual line matches returned, not the number of
+        candidate documents fetched.
         """
         norm_root = normalize_path(root)
-        # Validate root exists
         self._require_exists(norm_root)
 
-        filters = and_filter(
+        # Scope filters — no text filter, locally authoritative
+        scope = and_filter(
             ["kind", "Eq", "file"],
             ["is_text", "Eq", 1],
             subtree_filter(norm_root),
             glob_filter(norm_root, glob_pat, ignore_case) if glob_pat else None,
-            text_substring_filter(pattern, ignore_case),
-        )
-        candidates = self._paginated_query(
-            filters, ["path", "text"], limit=limit,
         )
 
         needle = pattern.lower() if ignore_case else pattern
         results: list[dict[str, Any]] = []
-        for row in candidates:
-            text = str(row.get("text", ""))
-            for line_num, line in enumerate(text.split("\n"), start=1):
-                haystack = line.lower() if ignore_case else line
-                if needle in haystack:
-                    results.append({
-                        "kind": "line_match",
-                        "path": str(row.get("path", "")),
-                        "line_number": line_num,
-                        "line": line,
-                    })
-                    if len(results) >= limit:
-                        return results
+        last_path: str | None = None
+        page_size = 256
+
+        while len(results) < limit:
+            page_filter = and_filter(
+                scope,
+                ["path", "Gt", last_path] if last_path is not None else None,
+            )
+            candidates = self._query(
+                page_filter, ["path", "text"],
+                rank_by=("path", "asc"), limit=page_size,
+            )
+            if not candidates:
+                break
+
+            for row in candidates:
+                text = str(row.get("text", ""))
+                for line_num, line in enumerate(text.split("\n"), start=1):
+                    haystack = line.lower() if ignore_case else line
+                    if needle in haystack:
+                        results.append({
+                            "kind": "line_match",
+                            "path": str(row.get("path", "")),
+                            "line_number": line_num,
+                            "line": line,
+                        })
+                        if len(results) >= limit:
+                            return results
+
+            last_path = str(candidates[-1].get("path", ""))
+            if len(candidates) < page_size:
+                break
+
         return results
 
     def _grep_regex(
@@ -758,41 +879,59 @@ class TpFS:
         glob_pat: str | None,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Regex grep.
+        """Locally-authoritative regex grep.
 
-        Remote: fetch all text files in the subtree (with optional glob).
-        No remote text filter — regex can't be approximated by Glob.
-        Local: compile the regex, test each line.
+        Fetches all text files in the subtree page-by-page (with optional
+        glob filter).  Compiles the regex locally and tests each line.
+        The ``limit`` parameter caps actual line matches, not candidate
+        documents.
         """
         norm_root = normalize_path(root)
         self._require_exists(norm_root)
 
-        filters = and_filter(
+        scope = and_filter(
             ["kind", "Eq", "file"],
             ["is_text", "Eq", 1],
             subtree_filter(norm_root),
             glob_filter(norm_root, glob_pat, ignore_case) if glob_pat else None,
-        )
-        candidates = self._paginated_query(
-            filters, ["path", "text"], limit=limit,
         )
 
         flags = re.IGNORECASE if ignore_case else 0
         compiled = re.compile(pattern, flags)
 
         results: list[dict[str, Any]] = []
-        for row in candidates:
-            text = str(row.get("text", ""))
-            for line_num, line in enumerate(text.split("\n"), start=1):
-                if compiled.search(line):
-                    results.append({
-                        "kind": "line_match",
-                        "path": str(row.get("path", "")),
-                        "line_number": line_num,
-                        "line": line,
-                    })
-                    if len(results) >= limit:
-                        return results
+        last_path: str | None = None
+        page_size = 256
+
+        while len(results) < limit:
+            page_filter = and_filter(
+                scope,
+                ["path", "Gt", last_path] if last_path is not None else None,
+            )
+            candidates = self._query(
+                page_filter, ["path", "text"],
+                rank_by=("path", "asc"), limit=page_size,
+            )
+            if not candidates:
+                break
+
+            for row in candidates:
+                text = str(row.get("text", ""))
+                for line_num, line in enumerate(text.split("\n"), start=1):
+                    if compiled.search(line):
+                        results.append({
+                            "kind": "line_match",
+                            "path": str(row.get("path", "")),
+                            "line_number": line_num,
+                            "line": line,
+                        })
+                        if len(results) >= limit:
+                            return results
+
+            last_path = str(candidates[-1].get("path", ""))
+            if len(candidates) < page_size:
+                break
+
         return results
 
     def _grep_bm25(
@@ -891,11 +1030,18 @@ class TpFS:
         """Write (or overwrite) a text file.  Creates parent directories.
 
         Validates that the target is not a directory and no ancestor is
-        a file.
+        a file.  Enforces turbopuffer's max attribute value size.
         """
         norm = normalize_path(path)
         if norm == "/":
             raise ValueError("cannot write to root directory")
+
+        text_bytes = len(text.encode("utf-8"))
+        if text_bytes > MAX_TEXT_SIZE:
+            raise ValueError(
+                f"text file too large: {text_bytes} bytes exceeds "
+                f"{MAX_TEXT_SIZE} byte limit ({MAX_TEXT_SIZE // (1024*1024)} MiB)"
+            )
 
         check_paths = ancestor_paths(norm, include_self=False) + [norm]
         existing = self._query(
@@ -909,9 +1055,13 @@ class TpFS:
         if norm in existing_map and existing_map[norm].get("kind") == "dir":
             raise IsADirectoryError(norm)
 
-        rows = parent_directory_rows(norm) + [text_row(norm, text, mime)]
+        # Determine version: new file → 1, existing → old + 1
+        old_version = existing_map.get(norm, {}).get("version")
+        new_version = 1 if old_version is None else int(old_version) + 1
+
+        rows = parent_directory_rows(norm) + [text_row(norm, text, mime, version=new_version)]
         self._upsert(rows)
-        return metadata_row(text_row(norm, text, mime))
+        return metadata_row(text_row(norm, text, mime, version=new_version))
 
     def put_bytes(
         self,
@@ -919,10 +1069,21 @@ class TpFS:
         data: bytes,
         mime: str | None = None,
     ) -> dict[str, Any]:
-        """Write (or overwrite) a binary file.  Creates parent directories."""
+        """Write (or overwrite) a binary file.  Creates parent directories.
+
+        Enforces turbopuffer's max attribute value size (accounting for
+        base64 expansion).
+        """
         norm = normalize_path(path)
         if norm == "/":
             raise ValueError("cannot write to root directory")
+
+        if len(data) > MAX_BINARY_SIZE:
+            raise ValueError(
+                f"binary file too large: {len(data)} bytes exceeds "
+                f"{MAX_BINARY_SIZE} byte limit (~{MAX_BINARY_SIZE // (1024*1024)} MiB raw, "
+                f"which base64-encodes to ~{MAX_ATTRIBUTE_SIZE // (1024*1024)} MiB)"
+            )
 
         check_paths = ancestor_paths(norm, include_self=False) + [norm]
         existing = self._query(
@@ -936,9 +1097,13 @@ class TpFS:
         if norm in existing_map and existing_map[norm].get("kind") == "dir":
             raise IsADirectoryError(norm)
 
-        rows = parent_directory_rows(norm) + [bytes_row(norm, data, mime)]
+        # Determine version: new file → 1, existing → old + 1
+        old_version = existing_map.get(norm, {}).get("version")
+        new_version = 1 if old_version is None else int(old_version) + 1
+
+        rows = parent_directory_rows(norm) + [bytes_row(norm, data, mime, version=new_version)]
         self._upsert(rows)
-        return metadata_row(bytes_row(norm, data, mime))
+        return metadata_row(bytes_row(norm, data, mime, version=new_version))
 
     def rm(self, path: str, recursive: bool = False) -> dict[str, Any]:
         """Remove a file or directory.
@@ -973,25 +1138,33 @@ class TpFS:
             self._delete_ids(ids)
         return {"path": norm, "deleted": True, "count": len(ids)}
 
-    def cp(self, src: str, dst: str) -> dict[str, Any]:
-        """Copy a file to a new path.
+    def cp(
+        self, src: str, dst: str, *, recursive: bool = False,
+    ) -> dict[str, Any]:
+        """Copy a file or directory to a new path.
 
         If *dst* is an existing directory, copies into it with the
-        source basename.
+        source basename.  Directory copies require ``recursive=True``.
         """
         src_n = normalize_path(src)
         dst_n = normalize_path(dst)
         src_row = self._query_one(src_n, CONTENT_FIELDS)
         if src_row is None:
             raise FileNotFoundError(src_n)
-        if src_row.get("kind") == "dir":
-            raise IsADirectoryError(f"cp does not support directories: {src_n}")
 
         # If dst is an existing directory, copy into it
         dst_stat = self.stat(dst_n)
         if dst_stat and dst_stat.get("kind") == "dir":
             dst_n = normalize_path(f"{dst_n.rstrip('/')}/{path_basename(src_n)}")
 
+        if src_row.get("kind") == "dir":
+            if not recursive:
+                raise IsADirectoryError(
+                    f"cp requires -r/--recursive for directories: {src_n}"
+                )
+            return self._cp_recursive(src_n, dst_n)
+
+        # File copy
         if src_row.get("is_text"):
             return self.put_text(dst_n, str(src_row.get("text", "")),
                                  str(src_row.get("mime")) if src_row.get("mime") else None)
@@ -999,10 +1172,129 @@ class TpFS:
         return self.put_bytes(dst_n, data,
                               str(src_row.get("mime")) if src_row.get("mime") else None)
 
+    def _cp_recursive(
+        self, src: str, dst: str,
+    ) -> dict[str, Any]:
+        """Recursively copy a directory subtree.
+
+        Rejects copies into own descendant.  Uses a single batched
+        upsert when the subtree fits in one request (≤256 rows).
+        For larger subtrees, raises an explicit error in this pass.
+        """
+        src_n = normalize_path(src)
+        dst_n = normalize_path(dst)
+
+        # Reject copy into own descendant
+        if dst_n == src_n or dst_n.startswith(src_n.rstrip("/") + "/"):
+            raise ValueError(
+                f"cannot copy directory into itself or its own descendant: "
+                f"{src_n} → {dst_n}"
+            )
+
+        # Enumerate source subtree
+        entries = self.find(src_n)
+        if not entries:
+            raise FileNotFoundError(src_n)
+
+        max_batch = 256
+        if len(entries) > max_batch:
+            raise ValueError(
+                f"subtree too large for single-batch recursive cp "
+                f"({len(entries)} entries, limit {max_batch}). "
+                f"Not yet supported for large trees."
+            )
+
+        # Build destination rows with remapped paths
+        rows: list[dict[str, Any]] = []
+        src_prefix = src_n.rstrip("/")
+        dst_prefix = dst_n.rstrip("/")
+
+        for entry in entries:
+            entry_path = str(entry["path"])
+            # Remap path: src_prefix → dst_prefix
+            if entry_path == src_n:
+                new_path = dst_n
+            else:
+                suffix = entry_path[len(src_prefix):]
+                new_path = normalize_path(f"{dst_prefix}{suffix}")
+
+            if entry.get("kind") == "dir":
+                rows.append(directory_row(new_path))
+            else:
+                # Need to fetch content for files
+                content_row = self._query_one(entry_path, CONTENT_FIELDS)
+                if content_row is None:
+                    continue
+                mime = str(content_row.get("mime")) if content_row.get("mime") else None
+                if content_row.get("is_text"):
+                    rows.append(text_row(
+                        new_path,
+                        str(content_row.get("text", "")),
+                        mime=mime,
+                        version=1,
+                    ))
+                else:
+                    data = base64.b64decode(content_row.get("blob_b64", ""))
+                    rows.append(bytes_row(new_path, data, mime=mime, version=1))
+
+        # Add parent directories for the destination root
+        rows = parent_directory_rows(dst_n) + rows
+
+        # Deduplicate by id (parents may overlap)
+        seen_ids: set[str] = set()
+        unique_rows: list[dict[str, Any]] = []
+        for row in rows:
+            rid = str(row.get("id", ""))
+            if rid not in seen_ids:
+                seen_ids.add(rid)
+                unique_rows.append(row)
+
+        self._upsert(unique_rows)
+
+        n_files = sum(1 for e in entries if e.get("kind") == "file")
+        n_dirs = sum(1 for e in entries if e.get("kind") == "dir")
+        return {
+            "path": dst_n,
+            "source": src_n,
+            "files_copied": n_files,
+            "dirs_copied": n_dirs,
+            "total_docs": len(unique_rows),
+        }
+
     def mv(self, src: str, dst: str) -> dict[str, Any]:
-        """Move a file (copy + delete source)."""
-        result = self.cp(src, dst)
-        self.rm(src)
+        """Move a file or directory (copy + delete source).
+
+        Rejects moves into own descendant for directories.
+        """
+        src_n = normalize_path(src)
+        dst_n = normalize_path(dst)
+
+        if src_n == "/":
+            raise ValueError("cannot move root")
+
+        src_stat = self.stat(src_n)
+        if src_stat is None:
+            raise FileNotFoundError(src_n)
+
+        # If dst is an existing directory, move into it
+        dst_stat = self.stat(dst_n)
+        if dst_stat and dst_stat.get("kind") == "dir":
+            dst_n = normalize_path(f"{dst_n.rstrip('/')}/{path_basename(src_n)}")
+
+        if src_stat.get("kind") == "dir":
+            # Reject move into own descendant
+            if dst_n == src_n or dst_n.startswith(src_n.rstrip("/") + "/"):
+                raise ValueError(
+                    f"cannot move directory into itself or its own descendant: "
+                    f"{src_n} → {dst_n}"
+                )
+            result = self._cp_recursive(src_n, dst_n)
+            self.rm(src_n, recursive=True)
+            return result
+
+        # File move
+        result = self.cp(src_n, dst_n)
+        self.rm(src_n)
         return result
 
     def touch(self, path: str) -> dict[str, Any]:
@@ -1114,7 +1406,8 @@ class TpFS:
         """Hydrate: pull the workspace from turbopuffer to a local directory.
 
         Creates a local mirror of the durable filesystem.  Returns a manifest
-        that records the snapshot state for later sync.
+        that records the snapshot state for later sync, including version
+        numbers for files and the root entry itself.
         """
         import pathlib
 
@@ -1152,7 +1445,22 @@ class TpFS:
                 "mime": entry.get("mime"),
                 "size_bytes": entry.get("size_bytes", 0),
                 "is_text": entry.get("is_text", 0),
+                "version": entry.get("version"),
             }
+
+        # Ensure the root entry itself is always in the snapshot
+        if norm_root not in manifest_entries:
+            root_stat = self.stat(norm_root)
+            if root_stat is not None:
+                manifest_entries[norm_root] = {
+                    "path": norm_root,
+                    "kind": root_stat.get("kind", "dir"),
+                    "sha256": root_stat.get("sha256"),
+                    "mime": root_stat.get("mime"),
+                    "size_bytes": root_stat.get("size_bytes", 0),
+                    "is_text": root_stat.get("is_text", 0),
+                    "version": root_stat.get("version"),
+                }
 
         session = self.load_session()
         manifest = {
@@ -1177,15 +1485,33 @@ class TpFS:
         Compares the local directory against the hydration snapshot to detect
         created, modified, and deleted files.  Detects remote conflicts
         (files changed in turbopuffer since hydration).
+
+        Correctness invariants:
+          - sync_root itself is always included in local_entries
+          - Deletions run deepest-first (children before parents)
+          - Creations run parents-first
+          - file↔dir replacements are handled explicitly
         """
         import pathlib
 
         local = pathlib.Path(local_root).resolve()
-        sync_root = str(manifest.get("root", "/"))
+        if not local.is_dir():
+            raise NotADirectoryError(f"local_root is not a directory: {local_root}")
+
+        sync_root = normalize_path(str(manifest.get("root", "/")))
         snapshot = manifest.get("snapshot", manifest.get("entries", {}))
 
-        # Scan local directory
+        # ── Scan local directory ─────────────────────────────────────────────
         local_entries: dict[str, dict[str, Any]] = {}
+
+        # Always add the sync_root itself — this is the critical fix.
+        # Without this, a hydrated subtree like /project would have its
+        # root entry misclassified as "deleted locally" during diff.
+        local_entries[sync_root] = {
+            "path": sync_root, "kind": "dir",
+            "size_bytes": 0, "is_text": 0,
+        }
+
         for local_path in sorted(local.rglob("*")):
             rel = str(local_path.relative_to(local))
             if sync_root == "/":
@@ -1207,23 +1533,27 @@ class TpFS:
                     "size_bytes": len(data),
                     "is_text": 1 if is_text else 0,
                 }
-        # Also add the root dir itself
-        if sync_root == "/":
-            local_entries["/"] = {"path": "/", "kind": "dir", "size_bytes": 0, "is_text": 0}
 
-        # Fetch current remote state
+        # ── Fetch current remote state ───────────────────────────────────────
         current_rows = self.find(sync_root)
         current_map = {str(r["path"]): r for r in current_rows}
 
-        created: list[str] = []
-        modified: list[str] = []
-        deleted: list[str] = []
+        # ── Classify changes ─────────────────────────────────────────────────
+        # We collect operations into lists, then execute in the correct order:
+        #   1. Creations: parents-first (sorted by path depth ascending)
+        #   2. Modifications: any order
+        #   3. Deletions: deepest-first (sorted by path depth descending)
+        ops_create: list[tuple[str, dict[str, Any]]] = []   # (path, local_entry)
+        ops_modify: list[tuple[str, dict[str, Any]]] = []   # (path, local_entry)
+        ops_delete: list[str] = []
+        ops_replace: list[tuple[str, dict[str, Any]]] = []  # file↔dir swap
         unchanged: list[str] = []
         conflicts: list[dict[str, str]] = []
 
         all_paths = sorted(set(list(local_entries.keys()) + list(snapshot.keys())))
         for path in all_paths:
-            if path == "/":
+            # Skip sync_root itself — it should never be deleted or recreated
+            if path == sync_root:
                 continue
             snap = snapshot.get(path)
             curr = current_map.get(path)
@@ -1243,32 +1573,162 @@ class TpFS:
 
             if loc is None:
                 # Deleted locally
-                self.rm(path, recursive=(curr or {}).get("kind") == "dir")
-                deleted.append(path)
+                ops_delete.append(path)
                 continue
 
-            local_file = local / path.lstrip("/") if sync_root == "/" else local / path[len(sync_root):].lstrip("/")
+            # Detect file↔dir kind replacement
+            if curr is not None and curr.get("kind") != loc.get("kind"):
+                ops_replace.append((path, loc))
+                continue
 
             if loc["kind"] == "dir":
                 if not curr:
-                    self.mkdir(path)
-                    created.append(path)
+                    ops_create.append((path, loc))
                 else:
                     unchanged.append(path)
                 continue
 
-            data = local_file.read_bytes()
-            if loc.get("is_text"):
-                self.put_text(path, data.decode("utf-8"),
-                              mime=(curr or {}).get("mime") or loc.get("mime"))
-            else:
-                self.put_bytes(path, data,
-                               mime=(curr or {}).get("mime") or loc.get("mime"))
-
+            # File create or modify
             if curr:
-                modified.append(path)
+                ops_modify.append((path, loc))
             else:
+                ops_create.append((path, loc))
+
+        # ── Execute operations using conditional writes ────────────────────
+        created: list[str] = []
+        modified: list[str] = []
+        deleted: list[str] = []
+
+        def _local_file_path(mount_path: str) -> pathlib.Path:
+            if sync_root == "/":
+                return local / mount_path.lstrip("/")
+            return local / mount_path[len(sync_root):].lstrip("/")
+
+        def _build_file_row(
+            mount_path: str, loc: dict[str, Any], version: int,
+        ) -> dict[str, Any]:
+            """Build a file row from local data for sync upload."""
+            local_file = _local_file_path(mount_path)
+            data = local_file.read_bytes()
+            curr = current_map.get(mount_path)
+            mime = (curr or {}).get("mime") or loc.get("mime")
+            if loc.get("is_text"):
+                return text_row(mount_path, data.decode("utf-8"), mime=mime, version=version)
+            return bytes_row(mount_path, data, mime=mime, version=version)
+
+        # 1. file↔dir replacements: conditional delete old, then create new
+        for path, loc in ops_replace:
+            curr = current_map.get(path)
+            if curr:
+                curr_version = curr.get("version")
+                doc_id = path_id(path)
+                del_ids = self._conditional_delete(
+                    [doc_id],
+                    expected_version=int(curr_version) if curr_version is not None else None,
+                )
+                if not del_ids and curr_version is not None:
+                    conflicts.append({"path": path, "reason": "concurrent_modification_on_replace"})
+                    continue
+            if loc["kind"] == "dir":
+                self.mkdir(path)
+            else:
+                row = _build_file_row(path, loc, version=1)
+                self._upsert(parent_directory_rows(path) + [row])
+            modified.append(path)
+
+        # 2. Creations: parents first (sort by depth ascending)
+        #    Use conditional upsert — only succeeds if doc doesn't exist
+        ops_create.sort(key=lambda x: x[0].count("/"))
+        create_dir_rows: list[dict[str, Any]] = []
+        create_file_rows: list[dict[str, Any]] = []
+
+        for path, loc in ops_create:
+            if loc["kind"] == "dir":
+                create_dir_rows.append(directory_row(path))
+            else:
+                row = _build_file_row(path, loc, version=1)
+                # Ensure parents exist
+                create_dir_rows.extend(parent_directory_rows(path))
+                create_file_rows.append(row)
+
+        # Batch directory creations (unconditional — dirs are idempotent)
+        if create_dir_rows:
+            # Deduplicate by id
+            seen_ids: set[str] = set()
+            unique_dirs: list[dict[str, Any]] = []
+            for dr in create_dir_rows:
+                did = str(dr["id"])
+                if did not in seen_ids:
+                    seen_ids.add(did)
+                    unique_dirs.append(dr)
+            self._upsert(unique_dirs)
+
+        # Batch file creations with conditional upsert
+        if create_file_rows:
+            upserted_ids = self._conditional_upsert(create_file_rows)
+            upserted_set = set(upserted_ids)
+            for row in create_file_rows:
+                p = str(row.get("path", ""))
+                rid = str(row.get("id", ""))
+                if rid in upserted_set:
+                    created.append(p)
+                else:
+                    conflicts.append({"path": p, "reason": "concurrent_creation"})
+        # Add created dirs
+        for path, loc in ops_create:
+            if loc["kind"] == "dir":
                 created.append(path)
+
+        # 3. Modifications: use conditional patch with version check
+        if ops_modify:
+            modify_rows: list[dict[str, Any]] = []
+            for path, loc in ops_modify:
+                snap_entry = snapshot.get(path, {})
+                old_version = snap_entry.get("version")
+                new_version = (int(old_version) + 1) if old_version is not None else 1
+                row = _build_file_row(path, loc, version=new_version)
+                modify_rows.append(row)
+
+            patched_ids = self._conditional_patch(modify_rows)
+            patched_set = set(patched_ids)
+            for row in modify_rows:
+                p = str(row.get("path", ""))
+                rid = str(row.get("id", ""))
+                if rid in patched_set:
+                    modified.append(p)
+                else:
+                    conflicts.append({"path": p, "reason": "concurrent_modification"})
+
+        # 4. Deletions: deepest first (sort by depth descending)
+        #    File deletions first, then directory deletions
+        ops_delete.sort(key=lambda x: x.count("/"), reverse=True)
+
+        file_deletes: list[tuple[str, str, int | None]] = []  # (path, id, version)
+        dir_deletes: list[tuple[str, str]] = []  # (path, id)
+        for path in ops_delete:
+            curr = current_map.get(path)
+            doc_id = path_id(path)
+            if curr and curr.get("kind") == "dir":
+                dir_deletes.append((path, doc_id))
+            else:
+                snap_entry = snapshot.get(path, {})
+                version = snap_entry.get("version")
+                file_deletes.append((path, doc_id, int(version) if version is not None else None))
+
+        # Delete files with version condition (one at a time for precise
+        # conflict reporting — batching across different expected versions
+        # is not supported by a single delete_condition)
+        for path, doc_id, version in file_deletes:
+            del_ids = self._conditional_delete([doc_id], expected_version=version)
+            if del_ids:
+                deleted.append(path)
+            else:
+                conflicts.append({"path": path, "reason": "concurrent_modification_on_delete"})
+
+        # Delete directories (no version check — dirs don't have versions)
+        for path, doc_id in dir_deletes:
+            self._delete_ids([doc_id])
+            deleted.append(path)
 
         return {
             "mount": self.mount,
@@ -1382,31 +1842,79 @@ class TpFS:
     # ── workspace operations ─────────────────────────────────────────────────
 
     def init_workspace(self) -> dict[str, Any]:
-        """Initialize a standard workspace layout.
+        """Initialize a standard workspace layout (idempotent).
 
         Creates:
           /state  /logs  /output  /scratch  /project  /input
 
-        Writes initial session state (cwd=/project) and workspace
-        metadata documents.
+        If the workspace already exists (``/state/workspace.json`` is
+        present), ensures directories exist but does **not** reset the
+        session or overwrite workspace metadata.  This makes ``init``
+        safe to call on every shell boot without clobbering durable cwd.
+
+        Uses a single batched write for fresh initialization instead
+        of multiple sequential API calls.
         """
         dirs = ["/state", "/logs", "/output", "/scratch", "/project", "/input"]
-        for d in dirs:
-            self.mkdir(d)
 
+        # Check if workspace already exists
+        existing_ws = self.stat("/state/workspace.json")
+
+        if existing_ws is not None:
+            # Workspace already initialized — ensure standard dirs exist
+            # Batch all dir rows into a single upsert (dirs are idempotent)
+            all_dir_rows: list[dict[str, Any]] = []
+            for d in dirs:
+                for p in ancestor_paths(d, include_self=True):
+                    all_dir_rows.append(directory_row(p))
+            # Deduplicate by id
+            seen: set[str] = set()
+            unique: list[dict[str, Any]] = []
+            for row in all_dir_rows:
+                rid = str(row["id"])
+                if rid not in seen:
+                    seen.add(rid)
+                    unique.append(row)
+            self._upsert(unique)
+
+            session = self.load_session()
+            return {
+                "mount": self.mount,
+                "namespace": self.namespace,
+                "dirs_created": dirs,
+                "session_cwd": str(session.get("cwd", "/")),
+                "already_initialized": True,
+            }
+
+        # Fresh workspace — batch everything into a single write
         ts = now_iso()
-        session: dict[str, Any] = {
+
+        # Build all directory rows
+        all_rows: list[dict[str, Any]] = []
+        for d in dirs:
+            for p in ancestor_paths(d, include_self=True):
+                all_rows.append(directory_row(p))
+
+        # Add session state document
+        session_data: dict[str, Any] = {
             "cwd": "/project",
             "mount": self.mount,
             "updated_at": ts,
             "path": "/state/session.json",
         }
-        self.save_session(session)
+        all_rows.append(text_row(
+            "/state/session.json",
+            json.dumps(session_data, indent=2),
+            mime="application/json",
+            version=1,
+        ))
 
+        # Add workspace metadata document
         metadata: dict[str, Any] = {
             "path": "/state/workspace.json",
             "mount": self.mount,
             "workspace_kind": "interactive",
+            "schema_version": SCHEMA_VERSION,
             "created_at": ts,
             "updated_at": ts,
             "status": "active",
@@ -1419,17 +1927,31 @@ class TpFS:
             "project_dir": "/project",
             "input_dir": "/input",
         }
-        self.put_text(
+        all_rows.append(text_row(
             "/state/workspace.json",
             json.dumps(metadata, indent=2),
             mime="application/json",
-        )
+            version=1,
+        ))
+
+        # Deduplicate by id (ancestors of different dirs overlap)
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for row in all_rows:
+            rid = str(row["id"])
+            if rid not in seen:
+                seen.add(rid)
+                unique.append(row)
+
+        # Single batched write
+        self._upsert(unique)
 
         return {
             "mount": self.mount,
             "namespace": self.namespace,
             "dirs_created": dirs,
             "session_cwd": "/project",
+            "already_initialized": False,
         }
 
     # ── mount operations ─────────────────────────────────────────────────────
@@ -1683,7 +2205,50 @@ class TpFSState:
 pass_state = click.make_pass_decorator(TpFSState)
 
 
-@click.group()
+# ── JSON error envelope ─────────────────────────────────────────────────────
+
+# Maps Python exception types to stable machine-readable error codes.
+_ERROR_TYPE_MAP: dict[type, str] = {
+    FileNotFoundError: "FileNotFoundError",
+    IsADirectoryError: "IsADirectoryError",
+    NotADirectoryError: "NotADirectoryError",
+    FileExistsError: "FileExistsError",
+    PermissionError: "PermissionError",
+    ValueError: "ValueError",
+    OSError: "OSError",
+}
+
+# Thread-local (process-global for Click) flag for JSON mode
+_json_mode: bool = False
+
+
+def _json_err(error_type: str, message: str) -> None:
+    """Emit a structured JSON error to stderr."""
+    click.echo(json.dumps({
+        "error": {"type": error_type, "message": message}
+    }), err=True)
+
+
+class TpFSGroup(click.Group):
+    """Custom Click group that emits structured JSON errors when --json is set."""
+
+    def invoke(self, ctx: click.Context) -> Any:
+        global _json_mode  # noqa: PLW0603
+        # Parse --json early so error handler knows the mode
+        _json_mode = "--json" in sys.argv
+        try:
+            return super().invoke(ctx)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            if _json_mode:
+                error_type = _ERROR_TYPE_MAP.get(type(exc), type(exc).__name__)
+                _json_err(error_type, str(exc))
+                raise SystemExit(1) from exc
+            raise
+
+
+@click.group(cls=TpFSGroup)
 @click.option("--api-key", envvar="TURBOPUFFER_API_KEY", default=None,
               help="Turbopuffer API key (or set TURBOPUFFER_API_KEY).")
 @click.option("--region", envvar="TURBOPUFFER_REGION", default="aws-us-west-2",
@@ -1701,10 +2266,14 @@ def cli(ctx: click.Context, api_key: str | None, region: str,
     Agents can boot, work, die, and reboot — recovering all state
     from turbopuffer alone.
     """
+    global _json_mode  # noqa: PLW0603
+    _json_mode = use_json
     if not api_key:
-        click.echo("Error: --api-key or TURBOPUFFER_API_KEY is required.", err=True)
-        ctx.exit(1)
-        return
+        if use_json:
+            _json_err("ConfigError", "--api-key or TURBOPUFFER_API_KEY is required")
+        else:
+            click.echo("Error: --api-key or TURBOPUFFER_API_KEY is required.", err=True)
+        raise SystemExit(1)
     fs = TpFS(api_key=api_key, region=region, mount=mount)
     ctx.obj = TpFSState(fs, use_json)
 
@@ -1714,12 +2283,15 @@ def cli(ctx: click.Context, api_key: str | None, region: str,
 @cli.command()
 @pass_state
 def init(state: TpFSState) -> None:
-    """Initialize a workspace with standard directory layout."""
+    """Initialize a workspace with standard directory layout (idempotent)."""
     result = state.fs.init_workspace()
     if state.use_json:
         _json_out(result)
     else:
-        click.echo(click.style("✓ Workspace initialized", fg="green", bold=True))
+        if result.get("already_initialized"):
+            click.echo(click.style("✓ Workspace already initialized (no reset)", fg="green", bold=True))
+        else:
+            click.echo(click.style("✓ Workspace initialized", fg="green", bold=True))
         click.echo(f"  mount:     {result['mount']}")
         click.echo(f"  namespace: {result['namespace']}")
         click.echo(f"  created:   {' '.join(result['dirs_created'])}")
@@ -1827,6 +2399,54 @@ def cat(state: TpFSState, path: str) -> None:
         click.echo(text, nl=False)
         if text and not text.endswith("\n"):
             click.echo()
+
+
+# ── read-bytes ────────────────────────────────────────────────────────────────
+
+@cli.command("read-bytes")
+@click.argument("path")
+@pass_state
+def read_bytes_cmd(state: TpFSState, path: str) -> None:
+    """Read a file as base64-encoded bytes (works for text and binary)."""
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    data = state.fs.read_bytes(resolved)
+    row = state.fs.stat(resolved)
+    result = {
+        "path": resolved,
+        "base64": base64.b64encode(data).decode("ascii"),
+        "mime": str(row.get("mime", "")) if row else "",
+        "sha256": sha256_hex(data),
+        "size_bytes": len(data),
+    }
+    if state.use_json:
+        _json_out(result)
+    else:
+        click.echo(result["base64"])
+
+
+# ── write-bytes ───────────────────────────────────────────────────────────────
+
+@cli.command("write-bytes")
+@click.argument("path")
+@click.option("--stdin-base64", is_flag=True, help="Read base64 from stdin.")
+@click.option("--mime", default=None, help="MIME type override.")
+@pass_state
+def write_bytes_cmd(state: TpFSState, path: str, stdin_base64: bool, mime: str | None) -> None:
+    """Write a binary file from base64 input."""
+    if not stdin_base64:
+        raise click.UsageError("provide --stdin-base64")
+    raw = sys.stdin.read().strip()
+    data = base64.b64decode(raw)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.put_bytes(resolved, data, mime=mime)
+    if state.use_json:
+        _json_out(result)
+    else:
+        click.echo(click.style(
+            f"✓ {result['path']}  ({_format_size(result.get('size_bytes', 0))})",
+            fg="green"))
 
 
 # ── head ─────────────────────────────────────────────────────────────────────
@@ -2015,17 +2635,25 @@ def rm(state: TpFSState, path: str, recursive: bool) -> None:
 @cli.command()
 @click.argument("src")
 @click.argument("dst")
+@click.option("-r", "--recursive", is_flag=True, help="Recursive copy for directories.")
 @pass_state
-def cp(state: TpFSState, src: str, dst: str) -> None:
-    """Copy a file."""
+def cp(state: TpFSState, src: str, dst: str, recursive: bool) -> None:
+    """Copy a file or directory (-r for directories)."""
     cwd = state.fs.pwd()
     src_r = resolve_path(src, cwd)
     dst_r = resolve_path(dst, cwd)
-    result = state.fs.cp(src_r, dst_r)
+    result = state.fs.cp(src_r, dst_r, recursive=recursive)
     if state.use_json:
         _json_out(result)
     else:
-        click.echo(click.style(f"✓ copied → {result['path']}", fg="green"))
+        target = result.get("path", dst_r)
+        if "files_copied" in result:
+            click.echo(click.style(
+                f"✓ copied {result['files_copied']} files, "
+                f"{result['dirs_copied']} dirs → {target}",
+                fg="green"))
+        else:
+            click.echo(click.style(f"✓ copied → {target}", fg="green"))
 
 
 # ── mv ───────────────────────────────────────────────────────────────────────
@@ -2035,7 +2663,7 @@ def cp(state: TpFSState, src: str, dst: str) -> None:
 @click.argument("dst")
 @pass_state
 def mv(state: TpFSState, src: str, dst: str) -> None:
-    """Move a file."""
+    """Move a file or directory."""
     cwd = state.fs.pwd()
     src_r = resolve_path(src, cwd)
     dst_r = resolve_path(dst, cwd)
@@ -2043,7 +2671,8 @@ def mv(state: TpFSState, src: str, dst: str) -> None:
     if state.use_json:
         _json_out(result)
     else:
-        click.echo(click.style(f"✓ moved → {result['path']}", fg="green"))
+        target = result.get("path", dst_r)
+        click.echo(click.style(f"✓ moved → {target}", fg="green"))
 
 
 # ── touch ────────────────────────────────────────────────────────────────────
