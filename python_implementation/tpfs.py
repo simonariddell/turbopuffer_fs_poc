@@ -2273,8 +2273,7 @@ def cli(ctx: click.Context, api_key: str | None, region: str,
             _json_err("ConfigError", "--api-key or TURBOPUFFER_API_KEY is required")
         else:
             click.echo("Error: --api-key or TURBOPUFFER_API_KEY is required.", err=True)
-        ctx.exit(1)
-        return
+        raise SystemExit(1)
     fs = TpFS(api_key=api_key, region=region, mount=mount)
     ctx.obj = TpFSState(fs, use_json)
 
