@@ -349,6 +349,80 @@ or any sync daemon. It just read from turbopuffer.
 
 ---
 
+## just-bash Integration
+
+`tpfs_bash.ts` bridges [just-bash](https://github.com/vercel-labs/just-bash)
+to `tpfs.py`, implementing the `IFileSystem` interface so that standard bash
+commands (`ls`, `cat`, `echo >`, `cp`, `rm`, etc.) all operate on the
+turbopuffer-backed filesystem transparently.
+
+### How It Works
+
+```
+  just-bash                    tpfs_bash.ts                 tpfs.py
+  ┌──────────┐                ┌──────────────┐            ┌──────────┐
+  │ ls /     │──readdir("/")──│ TpfsPyFs     │──exec──────│ --json   │──→ turbopuffer
+  │ cat foo  │──readFile()────│ implements   │  python3   │ ls /     │
+  │ echo > f │──writeFile()───│ IFileSystem  │  tpfs.py   │ cat foo  │
+  │ cp a b   │──cp()──────────│              │            │ put ...  │
+  └──────────┘                └──────────────┘            └──────────┘
+```
+
+Each `IFileSystem` method calls `python3 tpfs.py --json <command>` via
+`execFileSync`. The agent types normal bash — it never knows there's no disk.
+
+### Usage
+
+```typescript
+import { createTpfsBash } from "./tpfs_bash.js";
+
+const bash = await createTpfsBash({
+  apiKey: process.env.TURBOPUFFER_API_KEY!,
+  mount: "agent-demo",
+});
+
+// These are real bash commands — backed entirely by turbopuffer
+await bash.exec("ls /project");
+await bash.exec('echo "hello" > /project/hello.txt');
+await bash.exec("cat /project/hello.txt");
+await bash.exec("cp /project/hello.txt /output/hello.txt");
+```
+
+### Demo Output
+
+```
+$ pwd
+/project
+
+$ ls /
+input
+logs
+output
+project
+scratch
+state
+
+$ ls /project
+README.md
+solver.py
+
+$ echo "# Agent Notes" > /project/notes.md
+$ echo "- All state lives in turbopuffer" >> /project/notes.md
+
+$ cat /project/notes.md
+# Agent Notes
+- All state lives in turbopuffer
+
+$ cp /project/notes.md /output/notes.md
+$ ls /output
+notes.md
+```
+
+Every command above went through: just-bash → `TpfsPyFs` adapter →
+`python3 tpfs.py --json` → turbopuffer API. No local disk was touched.
+
+---
+
 ## JSON Output
 
 Every command supports `--json` for machine-consumable output:
