@@ -586,6 +586,86 @@ class TpFS:
             batch = ids[i : i + batch_size]
             self._ns.write(deletes=batch)
 
+    def _write_response_ids(
+        self, resp: Any, kind: str,
+    ) -> list[str]:
+        """Extract affected IDs from a write response.
+
+        *kind* is one of ``"upserted"``, ``"patched"``, ``"deleted"``.
+        """
+        if resp is None:
+            return []
+        field = f"{kind}_ids"
+        if hasattr(resp, field):
+            ids = getattr(resp, field)
+            return [str(i) for i in ids] if ids else []
+        if isinstance(resp, dict):
+            ids = resp.get(field)
+            return [str(i) for i in ids] if ids else []
+        if hasattr(resp, "model_dump"):
+            dumped = resp.model_dump()
+            ids = dumped.get(field)
+            return [str(i) for i in ids] if ids else []
+        return []
+
+    def _conditional_upsert(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[str]:
+        """Upsert rows only if the doc doesn't already exist.
+
+        Returns the IDs that were actually upserted.
+        """
+        if not rows:
+            return []
+        resp = self._ns.write(
+            upsert_rows=rows,
+            upsert_condition=["id", "Eq", None],
+            schema=FS_SCHEMA,
+            return_affected_ids=True,
+        )
+        return self._write_response_ids(resp, "upserted")
+
+    def _conditional_patch(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> list[str]:
+        """Patch rows using version-based optimistic concurrency.
+
+        The patch succeeds only if the remote version is less than the
+        incoming version (``$ref_new``).  Returns the IDs that were
+        actually patched.
+        """
+        if not rows:
+            return []
+        resp = self._ns.write(
+            patch_rows=rows,
+            patch_condition=["version", "Lt", {"$ref_new": "version"}],
+            schema=FS_SCHEMA,
+            return_affected_ids=True,
+        )
+        return self._write_response_ids(resp, "patched")
+
+    def _conditional_delete(
+        self,
+        ids: list[str],
+        expected_version: int | None = None,
+    ) -> list[str]:
+        """Delete rows with optional version-based condition.
+
+        Returns the IDs that were actually deleted.
+        """
+        if not ids:
+            return []
+        kwargs: dict[str, Any] = {
+            "deletes": ids,
+            "return_affected_ids": True,
+        }
+        if expected_version is not None:
+            kwargs["delete_condition"] = ["version", "Eq", expected_version]
+        resp = self._ns.write(**kwargs)
+        return self._write_response_ids(resp, "deleted")
+
     # ── read operations ──────────────────────────────────────────────────────
 
     def stat(self, path: str) -> dict[str, Any] | None:
@@ -1345,7 +1425,7 @@ class TpFS:
             else:
                 ops_create.append((path, loc))
 
-        # ── Execute operations in correct order ──────────────────────────────
+        # ── Execute operations using conditional writes ────────────────────
         created: list[str] = []
         modified: list[str] = []
         deleted: list[str] = []
@@ -1355,46 +1435,130 @@ class TpFS:
                 return local / mount_path.lstrip("/")
             return local / mount_path[len(sync_root):].lstrip("/")
 
-        def _write_file(mount_path: str, loc: dict[str, Any]) -> None:
+        def _build_file_row(
+            mount_path: str, loc: dict[str, Any], version: int,
+        ) -> dict[str, Any]:
+            """Build a file row from local data for sync upload."""
             local_file = _local_file_path(mount_path)
             data = local_file.read_bytes()
             curr = current_map.get(mount_path)
             mime = (curr or {}).get("mime") or loc.get("mime")
             if loc.get("is_text"):
-                self.put_text(mount_path, data.decode("utf-8"), mime=mime)
-            else:
-                self.put_bytes(mount_path, data, mime=mime)
+                return text_row(mount_path, data.decode("utf-8"), mime=mime, version=version)
+            return bytes_row(mount_path, data, mime=mime, version=version)
 
-        # 1. file↔dir replacements: delete old, then create new
+        # 1. file↔dir replacements: conditional delete old, then create new
         for path, loc in ops_replace:
             curr = current_map.get(path)
             if curr:
-                self.rm(path, recursive=curr.get("kind") == "dir")
+                curr_version = curr.get("version")
+                doc_id = path_id(path)
+                del_ids = self._conditional_delete(
+                    [doc_id],
+                    expected_version=int(curr_version) if curr_version is not None else None,
+                )
+                if not del_ids and curr_version is not None:
+                    conflicts.append({"path": path, "reason": "concurrent_modification_on_replace"})
+                    continue
             if loc["kind"] == "dir":
                 self.mkdir(path)
             else:
-                _write_file(path, loc)
+                row = _build_file_row(path, loc, version=1)
+                self._upsert(parent_directory_rows(path) + [row])
             modified.append(path)
 
         # 2. Creations: parents first (sort by depth ascending)
+        #    Use conditional upsert — only succeeds if doc doesn't exist
         ops_create.sort(key=lambda x: x[0].count("/"))
+        create_dir_rows: list[dict[str, Any]] = []
+        create_file_rows: list[dict[str, Any]] = []
+
         for path, loc in ops_create:
             if loc["kind"] == "dir":
-                self.mkdir(path)
+                create_dir_rows.append(directory_row(path))
             else:
-                _write_file(path, loc)
-            created.append(path)
+                row = _build_file_row(path, loc, version=1)
+                # Ensure parents exist
+                create_dir_rows.extend(parent_directory_rows(path))
+                create_file_rows.append(row)
 
-        # 3. Modifications
-        for path, loc in ops_modify:
-            _write_file(path, loc)
-            modified.append(path)
+        # Batch directory creations (unconditional — dirs are idempotent)
+        if create_dir_rows:
+            # Deduplicate by id
+            seen_ids: set[str] = set()
+            unique_dirs: list[dict[str, Any]] = []
+            for dr in create_dir_rows:
+                did = str(dr["id"])
+                if did not in seen_ids:
+                    seen_ids.add(did)
+                    unique_dirs.append(dr)
+            self._upsert(unique_dirs)
+
+        # Batch file creations with conditional upsert
+        if create_file_rows:
+            upserted_ids = self._conditional_upsert(create_file_rows)
+            upserted_set = set(upserted_ids)
+            for row in create_file_rows:
+                p = str(row.get("path", ""))
+                rid = str(row.get("id", ""))
+                if rid in upserted_set:
+                    created.append(p)
+                else:
+                    conflicts.append({"path": p, "reason": "concurrent_creation"})
+        # Add created dirs
+        for path, loc in ops_create:
+            if loc["kind"] == "dir":
+                created.append(path)
+
+        # 3. Modifications: use conditional patch with version check
+        if ops_modify:
+            modify_rows: list[dict[str, Any]] = []
+            for path, loc in ops_modify:
+                snap_entry = snapshot.get(path, {})
+                old_version = snap_entry.get("version")
+                new_version = (int(old_version) + 1) if old_version is not None else 1
+                row = _build_file_row(path, loc, version=new_version)
+                modify_rows.append(row)
+
+            patched_ids = self._conditional_patch(modify_rows)
+            patched_set = set(patched_ids)
+            for row in modify_rows:
+                p = str(row.get("path", ""))
+                rid = str(row.get("id", ""))
+                if rid in patched_set:
+                    modified.append(p)
+                else:
+                    conflicts.append({"path": p, "reason": "concurrent_modification"})
 
         # 4. Deletions: deepest first (sort by depth descending)
+        #    File deletions first, then directory deletions
         ops_delete.sort(key=lambda x: x.count("/"), reverse=True)
+
+        file_deletes: list[tuple[str, str, int | None]] = []  # (path, id, version)
+        dir_deletes: list[tuple[str, str]] = []  # (path, id)
         for path in ops_delete:
             curr = current_map.get(path)
-            self.rm(path, recursive=(curr or {}).get("kind") == "dir")
+            doc_id = path_id(path)
+            if curr and curr.get("kind") == "dir":
+                dir_deletes.append((path, doc_id))
+            else:
+                snap_entry = snapshot.get(path, {})
+                version = snap_entry.get("version")
+                file_deletes.append((path, doc_id, int(version) if version is not None else None))
+
+        # Delete files with version condition (one at a time for precise
+        # conflict reporting — batching across different expected versions
+        # is not supported by a single delete_condition)
+        for path, doc_id, version in file_deletes:
+            del_ids = self._conditional_delete([doc_id], expected_version=version)
+            if del_ids:
+                deleted.append(path)
+            else:
+                conflicts.append({"path": path, "reason": "concurrent_modification_on_delete"})
+
+        # Delete directories (no version check — dirs don't have versions)
+        for path, doc_id in dir_deletes:
+            self._delete_ids([doc_id])
             deleted.append(path)
 
         return {
