@@ -1157,7 +1157,8 @@ class TpFS:
         """Hydrate: pull the workspace from turbopuffer to a local directory.
 
         Creates a local mirror of the durable filesystem.  Returns a manifest
-        that records the snapshot state for later sync.
+        that records the snapshot state for later sync, including version
+        numbers for files and the root entry itself.
         """
         import pathlib
 
@@ -1195,7 +1196,22 @@ class TpFS:
                 "mime": entry.get("mime"),
                 "size_bytes": entry.get("size_bytes", 0),
                 "is_text": entry.get("is_text", 0),
+                "version": entry.get("version"),
             }
+
+        # Ensure the root entry itself is always in the snapshot
+        if norm_root not in manifest_entries:
+            root_stat = self.stat(norm_root)
+            if root_stat is not None:
+                manifest_entries[norm_root] = {
+                    "path": norm_root,
+                    "kind": root_stat.get("kind", "dir"),
+                    "sha256": root_stat.get("sha256"),
+                    "mime": root_stat.get("mime"),
+                    "size_bytes": root_stat.get("size_bytes", 0),
+                    "is_text": root_stat.get("is_text", 0),
+                    "version": root_stat.get("version"),
+                }
 
         session = self.load_session()
         manifest = {
@@ -1220,15 +1236,33 @@ class TpFS:
         Compares the local directory against the hydration snapshot to detect
         created, modified, and deleted files.  Detects remote conflicts
         (files changed in turbopuffer since hydration).
+
+        Correctness invariants:
+          - sync_root itself is always included in local_entries
+          - Deletions run deepest-first (children before parents)
+          - Creations run parents-first
+          - file↔dir replacements are handled explicitly
         """
         import pathlib
 
         local = pathlib.Path(local_root).resolve()
-        sync_root = str(manifest.get("root", "/"))
+        if not local.is_dir():
+            raise NotADirectoryError(f"local_root is not a directory: {local_root}")
+
+        sync_root = normalize_path(str(manifest.get("root", "/")))
         snapshot = manifest.get("snapshot", manifest.get("entries", {}))
 
-        # Scan local directory
+        # ── Scan local directory ─────────────────────────────────────────────
         local_entries: dict[str, dict[str, Any]] = {}
+
+        # Always add the sync_root itself — this is the critical fix.
+        # Without this, a hydrated subtree like /project would have its
+        # root entry misclassified as "deleted locally" during diff.
+        local_entries[sync_root] = {
+            "path": sync_root, "kind": "dir",
+            "size_bytes": 0, "is_text": 0,
+        }
+
         for local_path in sorted(local.rglob("*")):
             rel = str(local_path.relative_to(local))
             if sync_root == "/":
@@ -1250,23 +1284,27 @@ class TpFS:
                     "size_bytes": len(data),
                     "is_text": 1 if is_text else 0,
                 }
-        # Also add the root dir itself
-        if sync_root == "/":
-            local_entries["/"] = {"path": "/", "kind": "dir", "size_bytes": 0, "is_text": 0}
 
-        # Fetch current remote state
+        # ── Fetch current remote state ───────────────────────────────────────
         current_rows = self.find(sync_root)
         current_map = {str(r["path"]): r for r in current_rows}
 
-        created: list[str] = []
-        modified: list[str] = []
-        deleted: list[str] = []
+        # ── Classify changes ─────────────────────────────────────────────────
+        # We collect operations into lists, then execute in the correct order:
+        #   1. Creations: parents-first (sorted by path depth ascending)
+        #   2. Modifications: any order
+        #   3. Deletions: deepest-first (sorted by path depth descending)
+        ops_create: list[tuple[str, dict[str, Any]]] = []   # (path, local_entry)
+        ops_modify: list[tuple[str, dict[str, Any]]] = []   # (path, local_entry)
+        ops_delete: list[str] = []
+        ops_replace: list[tuple[str, dict[str, Any]]] = []  # file↔dir swap
         unchanged: list[str] = []
         conflicts: list[dict[str, str]] = []
 
         all_paths = sorted(set(list(local_entries.keys()) + list(snapshot.keys())))
         for path in all_paths:
-            if path == "/":
+            # Skip sync_root itself — it should never be deleted or recreated
+            if path == sync_root:
                 continue
             snap = snapshot.get(path)
             curr = current_map.get(path)
@@ -1286,32 +1324,78 @@ class TpFS:
 
             if loc is None:
                 # Deleted locally
-                self.rm(path, recursive=(curr or {}).get("kind") == "dir")
-                deleted.append(path)
+                ops_delete.append(path)
                 continue
 
-            local_file = local / path.lstrip("/") if sync_root == "/" else local / path[len(sync_root):].lstrip("/")
+            # Detect file↔dir kind replacement
+            if curr is not None and curr.get("kind") != loc.get("kind"):
+                ops_replace.append((path, loc))
+                continue
 
             if loc["kind"] == "dir":
                 if not curr:
-                    self.mkdir(path)
-                    created.append(path)
+                    ops_create.append((path, loc))
                 else:
                     unchanged.append(path)
                 continue
 
-            data = local_file.read_bytes()
-            if loc.get("is_text"):
-                self.put_text(path, data.decode("utf-8"),
-                              mime=(curr or {}).get("mime") or loc.get("mime"))
-            else:
-                self.put_bytes(path, data,
-                               mime=(curr or {}).get("mime") or loc.get("mime"))
-
+            # File create or modify
             if curr:
-                modified.append(path)
+                ops_modify.append((path, loc))
             else:
-                created.append(path)
+                ops_create.append((path, loc))
+
+        # ── Execute operations in correct order ──────────────────────────────
+        created: list[str] = []
+        modified: list[str] = []
+        deleted: list[str] = []
+
+        def _local_file_path(mount_path: str) -> pathlib.Path:
+            if sync_root == "/":
+                return local / mount_path.lstrip("/")
+            return local / mount_path[len(sync_root):].lstrip("/")
+
+        def _write_file(mount_path: str, loc: dict[str, Any]) -> None:
+            local_file = _local_file_path(mount_path)
+            data = local_file.read_bytes()
+            curr = current_map.get(mount_path)
+            mime = (curr or {}).get("mime") or loc.get("mime")
+            if loc.get("is_text"):
+                self.put_text(mount_path, data.decode("utf-8"), mime=mime)
+            else:
+                self.put_bytes(mount_path, data, mime=mime)
+
+        # 1. file↔dir replacements: delete old, then create new
+        for path, loc in ops_replace:
+            curr = current_map.get(path)
+            if curr:
+                self.rm(path, recursive=curr.get("kind") == "dir")
+            if loc["kind"] == "dir":
+                self.mkdir(path)
+            else:
+                _write_file(path, loc)
+            modified.append(path)
+
+        # 2. Creations: parents first (sort by depth ascending)
+        ops_create.sort(key=lambda x: x[0].count("/"))
+        for path, loc in ops_create:
+            if loc["kind"] == "dir":
+                self.mkdir(path)
+            else:
+                _write_file(path, loc)
+            created.append(path)
+
+        # 3. Modifications
+        for path, loc in ops_modify:
+            _write_file(path, loc)
+            modified.append(path)
+
+        # 4. Deletions: deepest first (sort by depth descending)
+        ops_delete.sort(key=lambda x: x.count("/"), reverse=True)
+        for path in ops_delete:
+            curr = current_map.get(path)
+            self.rm(path, recursive=(curr or {}).get("kind") == "dir")
+            deleted.append(path)
 
         return {
             "mount": self.mount,
