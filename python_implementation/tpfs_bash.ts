@@ -404,6 +404,15 @@ class TpfsPyFs implements IFileSystem {
     return posixResolve(base, target);
   }
 
+  /**
+   * Return the current path inventory.
+   *
+   * **Cache semantics**: This list is seeded at adapter creation via
+   * ``refreshPaths()`` and updated for mutations performed through
+   * this adapter instance.  It may lag concurrent out-of-band writers
+   * until the next ``refreshPaths()`` call.  Glob expansion in
+   * just-bash relies on this cache and is therefore best-effort.
+   */
   getAllPaths(): string[] {
     return [...this.pathCache];
   }
