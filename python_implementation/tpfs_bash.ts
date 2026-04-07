@@ -22,6 +22,7 @@
  *   await bash.exec('echo "hello" > /project/test.txt');
  */
 
+import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
 import { resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -257,8 +258,15 @@ class TpfsPyFs implements IFileSystem {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
-    const text = await this.readFile(path);
-    return new TextEncoder().encode(text);
+    const result = this.call(["read-bytes", path]) as { base64: string } | null;
+    if (!result?.base64) return new Uint8Array();
+    // Decode base64 to Uint8Array
+    const binaryString = atob(result.base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
   }
 
   async writeFile(
@@ -266,10 +274,15 @@ class TpfsPyFs implements IFileSystem {
     content: string | Uint8Array,
     _options?: { encoding?: BufferEncoding } | BufferEncoding,
   ): Promise<void> {
-    const text = content instanceof Uint8Array
-      ? new TextDecoder().decode(content)
-      : content;
-    this.call(["put", path, "--stdin"], text);
+    if (content instanceof Uint8Array) {
+      // Binary path: base64-encode and use write-bytes
+      const b64 = Buffer.from(content).toString("base64");
+      this.call(["write-bytes", path, "--stdin-base64"], b64);
+      this.addPath(path);
+      return;
+    }
+    // Text path: use put with stdin
+    this.call(["put", path, "--stdin"], content);
     this.addPath(path);
   }
 

@@ -2188,6 +2188,54 @@ def cat(state: TpFSState, path: str) -> None:
             click.echo()
 
 
+# ── read-bytes ────────────────────────────────────────────────────────────────
+
+@cli.command("read-bytes")
+@click.argument("path")
+@pass_state
+def read_bytes_cmd(state: TpFSState, path: str) -> None:
+    """Read a file as base64-encoded bytes (works for text and binary)."""
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    data = state.fs.read_bytes(resolved)
+    row = state.fs.stat(resolved)
+    result = {
+        "path": resolved,
+        "base64": base64.b64encode(data).decode("ascii"),
+        "mime": str(row.get("mime", "")) if row else "",
+        "sha256": sha256_hex(data),
+        "size_bytes": len(data),
+    }
+    if state.use_json:
+        _json_out(result)
+    else:
+        click.echo(result["base64"])
+
+
+# ── write-bytes ───────────────────────────────────────────────────────────────
+
+@cli.command("write-bytes")
+@click.argument("path")
+@click.option("--stdin-base64", is_flag=True, help="Read base64 from stdin.")
+@click.option("--mime", default=None, help="MIME type override.")
+@pass_state
+def write_bytes_cmd(state: TpFSState, path: str, stdin_base64: bool, mime: str | None) -> None:
+    """Write a binary file from base64 input."""
+    if not stdin_base64:
+        raise click.UsageError("provide --stdin-base64")
+    raw = sys.stdin.read().strip()
+    data = base64.b64decode(raw)
+    cwd = state.fs.pwd()
+    resolved = resolve_path(path, cwd)
+    result = state.fs.put_bytes(resolved, data, mime=mime)
+    if state.use_json:
+        _json_out(result)
+    else:
+        click.echo(click.style(
+            f"✓ {result['path']}  ({_format_size(result.get('size_bytes', 0))})",
+            fg="green"))
+
+
 # ── head ─────────────────────────────────────────────────────────────────────
 
 @cli.command()
