@@ -43,6 +43,15 @@ import turbopuffer as tpuf
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 MOUNT_SUFFIX = "__fs"
+SCHEMA_VERSION = 2
+
+# ── Size limits (turbopuffer documented maximums) ────────────────────────────
+# Max attribute value size:  8 MiB
+# Max document size:        64 MiB
+# base64 overhead is ~4/3, so raw binary limit is ~6 MiB to stay under 8 MiB
+MAX_ATTRIBUTE_SIZE: int = 8 * 1024 * 1024        # 8 MiB
+MAX_TEXT_SIZE: int = MAX_ATTRIBUTE_SIZE           # text stored directly
+MAX_BINARY_SIZE: int = int(MAX_ATTRIBUTE_SIZE * 0.74)  # ~5.9 MiB raw → ~8 MiB b64
 
 TEXT_EXTENSIONS: frozenset[str] = frozenset({
     ".c", ".cfg", ".conf", ".cpp", ".css", ".csv", ".dockerfile",
@@ -87,30 +96,32 @@ MIME_TABLE: dict[str, str] = {
 }
 
 FS_SCHEMA: dict[str, Any] = {
-    "path":    {"type": "string", "filterable": True},
-    "parent":  "string",
-    "basename": {"type": "string", "filterable": True},
-    "kind":    "string",
-    "ext":     "string",
-    "mime":    "string",
+    "path":      {"type": "string", "filterable": True, "glob": True},
+    "parent":    "string",
+    "basename":  {"type": "string", "filterable": True, "glob": True},
+    "kind":      "string",
+    "ext":       "string",
+    "mime":      "string",
     "size_bytes": "uint",
-    "is_text": "uint",
+    "is_text":   "uint",
+    "version":   "uint",   # files only; null on dirs is fine
     "text": {
         "type": "string",
-        "filterable": True,
         "full_text_search": {
             "tokenizer": "word_v3",
             "remove_stopwords": False,
             "stemming": False,
         },
+        # do NOT set filterable here — documented 4 KiB ceiling on filterable
+        # values makes it unsafe for general file bodies in this pass
     },
-    "blob_b64": {"type": "string", "filterable": False},
-    "sha256":  "string",
+    "blob_b64":  {"type": "string", "filterable": False},
+    "sha256":    "string",
 }
 
 META_FIELDS: list[str] = [
     "id", "path", "parent", "basename", "kind", "ext",
-    "mime", "size_bytes", "is_text", "sha256",
+    "mime", "size_bytes", "is_text", "version", "sha256",
 ]
 
 CONTENT_FIELDS: list[str] = META_FIELDS + ["text", "blob_b64"]
@@ -358,6 +369,7 @@ def text_row(
     path: str,
     text: str,
     mime: str | None = None,
+    version: int | None = None,
 ) -> dict[str, Any]:
     """Build a text-file document."""
     data = text.encode("utf-8")
@@ -370,6 +382,8 @@ def text_row(
         digest=sha256_hex(data),
     )
     row["text"] = text
+    if version is not None:
+        row["version"] = version
     return row
 
 
@@ -377,6 +391,7 @@ def bytes_row(
     path: str,
     data: bytes,
     mime: str | None = None,
+    version: int | None = None,
 ) -> dict[str, Any]:
     """Build a binary-file document."""
     row = _base_row(
@@ -388,6 +403,8 @@ def bytes_row(
         digest=sha256_hex(data),
     )
     row["blob_b64"] = base64.b64encode(data).decode("ascii")
+    if version is not None:
+        row["version"] = version
     return row
 
 
@@ -891,11 +908,18 @@ class TpFS:
         """Write (or overwrite) a text file.  Creates parent directories.
 
         Validates that the target is not a directory and no ancestor is
-        a file.
+        a file.  Enforces turbopuffer's max attribute value size.
         """
         norm = normalize_path(path)
         if norm == "/":
             raise ValueError("cannot write to root directory")
+
+        text_bytes = len(text.encode("utf-8"))
+        if text_bytes > MAX_TEXT_SIZE:
+            raise ValueError(
+                f"text file too large: {text_bytes} bytes exceeds "
+                f"{MAX_TEXT_SIZE} byte limit ({MAX_TEXT_SIZE // (1024*1024)} MiB)"
+            )
 
         check_paths = ancestor_paths(norm, include_self=False) + [norm]
         existing = self._query(
@@ -909,9 +933,13 @@ class TpFS:
         if norm in existing_map and existing_map[norm].get("kind") == "dir":
             raise IsADirectoryError(norm)
 
-        rows = parent_directory_rows(norm) + [text_row(norm, text, mime)]
+        # Determine version: new file → 1, existing → old + 1
+        old_version = existing_map.get(norm, {}).get("version")
+        new_version = 1 if old_version is None else int(old_version) + 1
+
+        rows = parent_directory_rows(norm) + [text_row(norm, text, mime, version=new_version)]
         self._upsert(rows)
-        return metadata_row(text_row(norm, text, mime))
+        return metadata_row(text_row(norm, text, mime, version=new_version))
 
     def put_bytes(
         self,
@@ -919,10 +947,21 @@ class TpFS:
         data: bytes,
         mime: str | None = None,
     ) -> dict[str, Any]:
-        """Write (or overwrite) a binary file.  Creates parent directories."""
+        """Write (or overwrite) a binary file.  Creates parent directories.
+
+        Enforces turbopuffer's max attribute value size (accounting for
+        base64 expansion).
+        """
         norm = normalize_path(path)
         if norm == "/":
             raise ValueError("cannot write to root directory")
+
+        if len(data) > MAX_BINARY_SIZE:
+            raise ValueError(
+                f"binary file too large: {len(data)} bytes exceeds "
+                f"{MAX_BINARY_SIZE} byte limit (~{MAX_BINARY_SIZE // (1024*1024)} MiB raw, "
+                f"which base64-encodes to ~{MAX_ATTRIBUTE_SIZE // (1024*1024)} MiB)"
+            )
 
         check_paths = ancestor_paths(norm, include_self=False) + [norm]
         existing = self._query(
@@ -936,9 +975,13 @@ class TpFS:
         if norm in existing_map and existing_map[norm].get("kind") == "dir":
             raise IsADirectoryError(norm)
 
-        rows = parent_directory_rows(norm) + [bytes_row(norm, data, mime)]
+        # Determine version: new file → 1, existing → old + 1
+        old_version = existing_map.get(norm, {}).get("version")
+        new_version = 1 if old_version is None else int(old_version) + 1
+
+        rows = parent_directory_rows(norm) + [bytes_row(norm, data, mime, version=new_version)]
         self._upsert(rows)
-        return metadata_row(bytes_row(norm, data, mime))
+        return metadata_row(bytes_row(norm, data, mime, version=new_version))
 
     def rm(self, path: str, recursive: bool = False) -> dict[str, Any]:
         """Remove a file or directory.
