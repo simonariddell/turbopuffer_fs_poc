@@ -468,13 +468,9 @@ export async function createTpfsBash(options: TpfsBashOptions): Promise<Bash> {
   const mount = options.mount ?? "demo";
   const region = options.region ?? "aws-us-west-2";
 
-  // Initialize workspace if needed
+  // Initialize workspace if needed (init is idempotent — safe to call always)
   if (options.autoInit !== false) {
-    try {
-      tpfsExec(pythonPath, tpfsPath, mount, options.apiKey, region, ["init"]);
-    } catch {
-      // Workspace may already exist — that's fine
-    }
+    tpfsExec(pythonPath, tpfsPath, mount, options.apiKey, region, ["init"]);
   }
 
   // Get current working directory from tpfs session

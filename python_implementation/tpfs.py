@@ -1425,15 +1425,36 @@ class TpFS:
     # ── workspace operations ─────────────────────────────────────────────────
 
     def init_workspace(self) -> dict[str, Any]:
-        """Initialize a standard workspace layout.
+        """Initialize a standard workspace layout (idempotent).
 
         Creates:
           /state  /logs  /output  /scratch  /project  /input
 
-        Writes initial session state (cwd=/project) and workspace
-        metadata documents.
+        If the workspace already exists (``/state/workspace.json`` is
+        present), ensures directories exist but does **not** reset the
+        session or overwrite workspace metadata.  This makes ``init``
+        safe to call on every shell boot without clobbering durable cwd.
         """
         dirs = ["/state", "/logs", "/output", "/scratch", "/project", "/input"]
+
+        # Check if workspace already exists
+        existing_ws = self.stat("/state/workspace.json")
+
+        if existing_ws is not None:
+            # Workspace already initialized — ensure standard dirs exist
+            # (mkdir is already idempotent for existing dirs)
+            for d in dirs:
+                self.mkdir(d)
+            session = self.load_session()
+            return {
+                "mount": self.mount,
+                "namespace": self.namespace,
+                "dirs_created": dirs,
+                "session_cwd": str(session.get("cwd", "/")),
+                "already_initialized": True,
+            }
+
+        # Fresh workspace — create everything
         for d in dirs:
             self.mkdir(d)
 
@@ -1450,6 +1471,7 @@ class TpFS:
             "path": "/state/workspace.json",
             "mount": self.mount,
             "workspace_kind": "interactive",
+            "schema_version": SCHEMA_VERSION,
             "created_at": ts,
             "updated_at": ts,
             "status": "active",
@@ -1473,6 +1495,7 @@ class TpFS:
             "namespace": self.namespace,
             "dirs_created": dirs,
             "session_cwd": "/project",
+            "already_initialized": False,
         }
 
     # ── mount operations ─────────────────────────────────────────────────────
@@ -1757,12 +1780,15 @@ def cli(ctx: click.Context, api_key: str | None, region: str,
 @cli.command()
 @pass_state
 def init(state: TpFSState) -> None:
-    """Initialize a workspace with standard directory layout."""
+    """Initialize a workspace with standard directory layout (idempotent)."""
     result = state.fs.init_workspace()
     if state.use_json:
         _json_out(result)
     else:
-        click.echo(click.style("✓ Workspace initialized", fg="green", bold=True))
+        if result.get("already_initialized"):
+            click.echo(click.style("✓ Workspace already initialized (no reset)", fg="green", bold=True))
+        else:
+            click.echo(click.style("✓ Workspace initialized", fg="green", bold=True))
         click.echo(f"  mount:     {result['mount']}")
         click.echo(f"  namespace: {result['namespace']}")
         click.echo(f"  created:   {' '.join(result['dirs_created'])}")
